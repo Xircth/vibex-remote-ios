@@ -34,7 +34,7 @@ targets:
         SUPPORTS_MACCATALYST: false
         ENABLE_PREVIEWS: YES
         CODE_SIGN_STYLE: Automatic
-        CODE_SIGN_IDENTITY: "iPhone Developer"
+        CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: 4V898ZZZ3G
         INFOPLIST_KEY_CFBundleDisplayName: VibeX
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
