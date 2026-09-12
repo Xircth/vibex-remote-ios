@@ -1,0 +1,70 @@
+name: VibeXCompanion
+options:
+  bundleIdPrefix: dev.vibex
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+packages:
+  CompanionCore:
+    path: .
+targets:
+  VibeXCompanion:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: VibeXCompanion
+        excludes:
+          - "**/.DS_Store"
+          - Resources/Info.plist
+          - Resources/VibeXCompanion.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.vibex.companion
+        PRODUCT_NAME: VibeX
+        INFOPLIST_FILE: VibeXCompanion/Resources/Info.plist
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        TARGETED_DEVICE_FAMILY: "1,2"
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        GENERATE_INFOPLIST_FILE: false
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SUPPORTS_MACCATALYST: false
+        ENABLE_PREVIEWS: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "iPhone Developer"
+        DEVELOPMENT_TEAM: 4V898ZZZ3G
+        INFOPLIST_KEY_CFBundleDisplayName: VibeX
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+    dependencies:
+      - package: CompanionCore
+        product: CompanionCore
+    info:
+      path: VibeXCompanion/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: VibeX
+        NSCameraUsageDescription: 扫描电脑上的 VibeX 连接二维码
+        NSLocalNetworkUsageDescription: 在同一网络中连接你的 VibeX Host
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+          UIImageName: LaunchLogo
+        BGTaskSchedulerPermittedIdentifiers:
+          - dev.vibex.companion.refresh
+        UIBackgroundModes:
+          - fetch
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.vibex.companion
+            CFBundleURLSchemes:
+              - vibex
+    entitlements:
+      path: VibeXCompanion/Resources/VibeXCompanion.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)dev.vibex.companion
+    scheme:
+      gatherCoverageData: false
+      testTargets: []

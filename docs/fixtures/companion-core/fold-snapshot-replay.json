@@ -1,0 +1,32 @@
+{
+  "through_sequence": 3,
+  "payload": {
+    "rows": [
+      {
+        "id": "a1",
+        "kind": "assistant",
+        "body": "Hello"
+      }
+    ]
+  },
+  "replay": [
+    {
+      "sequence": 1,
+      "kind": "assistant_text_delta",
+      "payload": { "text": "Hel", "message_id": "m1" }
+    },
+    {
+      "sequence": 2,
+      "kind": "assistant_text_delta",
+      "payload": { "text": "lo", "message_id": "m1" }
+    },
+    {
+      "sequence": 3,
+      "kind": "turn_completed",
+      "payload": {}
+    }
+  ],
+  "expect_assistant_count": 1,
+  "expect_last_sequence": 3,
+  "expect_body": "Hello"
+}

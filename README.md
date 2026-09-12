@@ -1,29 +1,42 @@
 # VibeX-IOS
 
-VibeX Host 家族的 **iOS 伴随端**：纯原生 Swift / SwiftUI 薄客户端。功能与 [Android Companion](https://github.com/Xircth/vibex-companion) 相同；视觉规范沉淀自 [codeg-ios](https://github.com/xintaofei/codeg-ios)。
+VibeX Host 家族的 **iOS 伴随端**：纯原生 Swift / SwiftUI 薄客户端。功能对齐 [Android Companion](https://github.com/Xircth/vibex-companion)；仓库发布为 [vibex-remote-ios](https://github.com/Xircth/vibex-remote-ios)。产品范围仍是 Companion Device。
 
 离开键盘时配对桌上的 Host，查看回合、发送跟进，并在 Agent 卡住时拍板。不在手机上运行 Agent、Git 或终端。
 
-> 本仓库目前处于需求与设计规范阶段，应用代码尚未落地。
-
-## 文档
+## 结构
 
 | 路径 | 内容 |
 | --- | --- |
-| [PRD/](./PRD/README.md) | 完整产品需求：范围、屏幕、协议、验收 |
-| [docs/design/ios-companion.md](./docs/design/ios-companion.md) | 实现方案：Host 接入面、模块、页面、M0–M6 批次与 PR 计划 |
-| [PRODUCT.md](./PRODUCT.md) | 用户、定位、性格、设计原则 |
-| [DESIGN.md](./DESIGN.md) | 设计 token（机器可读）与六节视觉规范 |
-| [impeccable/](./impeccable/README.md) | codeg-ios 同源的组件、屏幕、平台与文案配方 |
+| `Sources/CompanionCore` | 可测深模块：配对、origin、scopes、EventFold、HostClient、Runtime |
+| `VibeXCompanion/` | SwiftUI 应用：四栏、时间线、设置、Keychain、相机扫码 |
+| `Checks/` | 无 XCTest 的 CompanionCore 金样（`swift run CompanionCoreCheck`） |
+| `PRD/` | 产品需求 |
+| `impeccable/` | 视觉与文案配方 |
+| `docs/design/ios-companion.md` | 实现方案 |
 
-实现前先读 `PRD/README.md` 与 `impeccable/README.md`。协议权威在 VibeX `docs/protocol/v1/`，本仓不手写第二份。
+显示名 **VibeX**，Bundle ID `dev.vibex.companion`。
+
+## 构建
+
+CompanionCore（本机可跑）：
+
+```sh
+swift run CompanionCoreCheck
+```
+
+iOS 应用（需要 Xcode + XcodeGen）：
+
+```sh
+brew install xcodegen
+xcodegen generate
+open VibeXCompanion.xcodeproj
+```
+
+工程由 `project.yml` 生成，不要手改 pbxproj。模拟器可运行；真机侧载需要开发者证书。Keychain 在模拟器上可降级，真机必须写入钥匙串。
 
 ## 不是什么
 
 - 缩小版 VibeX 桌面
-- Codeg 远程控制台（无 Git 写、MCP、终端 PTY、Agent 安装）
+- Codeg 远程控制台（无 Git 写、MCP、终端 PTY、Agent 安装、第五个搜索 Tab）
 - 跨平台 UI 壳
-
-## 技术栈（已锁定）
-
-Swift 6 · SwiftUI · iOS 26 / iPadOS 26 · Liquid Glass · XcodeGen · Keychain · Remote Protocol v1

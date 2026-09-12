@@ -1,0 +1,322 @@
+{
+  "sourceLanguage" : "zh-Hans",
+  "strings" : {
+    "#%@" : {
+
+    },
+    "%@" : {
+
+    },
+    "%@ · %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ · %2$@"
+          }
+        }
+      }
+    },
+    "%@ · 只连接 Host" : {
+
+    },
+    "%@ 条待你处理" : {
+
+    },
+    "Host" : {
+
+    },
+    "Host 上还没有已启用的 Agent" : {
+
+    },
+    "Host 更新了此会话" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Host updated this conversation"
+          }
+        }
+      }
+    },
+    "VibeX Companion" : {
+
+    },
+    "上次同步 %@" : {
+
+    },
+    "主题" : {
+
+    },
+    "主题色" : {
+
+    },
+    "会话" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conversations"
+          }
+        }
+      }
+    },
+    "会话同步" : {
+
+    },
+    "允许" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow"
+          }
+        }
+      }
+    },
+    "再试一次" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Try again"
+          }
+        }
+      }
+    },
+    "出了问题" : {
+
+    },
+    "删除本机档案与凭证，并在 Host 可达时撤销这台设备。" : {
+
+    },
+    "发送" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Send"
+          }
+        }
+      }
+    },
+    "在电脑上检查工作区后再手点重试。" : {
+
+    },
+    "在设置中允许相机，或改为手动输入连接码。" : {
+
+    },
+    "将连接二维码放入框内" : {
+
+    },
+    "尚未连接" : {
+
+    },
+    "工具调用" : {
+
+    },
+    "已折叠 %@ 条过程消息" : {
+
+    },
+    "已排队" : {
+
+    },
+    "应用在前台保持连接，系统允许时刷新终态摘要" : {
+
+    },
+    "强调色" : {
+
+    },
+    "当前不可发送" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sending is unavailable"
+          }
+        }
+      }
+    },
+    "当前邀请不含通知能力" : {
+
+    },
+    "忘记这台 Host" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Forget this Host"
+          }
+        }
+      }
+    },
+    "思考" : {
+
+    },
+    "手动输入连接码" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enter pairing code"
+          }
+        }
+      }
+    },
+    "打开电脑桌面端 → 设置 → 远程连接，点击「生成连接码」。" : {
+
+    },
+    "扫描连接二维码" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Scan pairing QR code"
+          }
+        }
+      }
+    },
+    "拒绝" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Deny"
+          }
+        }
+      }
+    },
+    "操作" : {
+
+    },
+    "文件夹" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Folders"
+          }
+        }
+      }
+    },
+    "断开只关掉当前连接。忘记会删除本机档案与凭证，并在可达时撤销这台设备。" : {
+
+    },
+    "新会话" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "New conversation"
+          }
+        }
+      }
+    },
+    "无法使用相机" : {
+
+    },
+    "本机" : {
+
+    },
+    "正在回复" : {
+
+    },
+    "没有候选" : {
+
+    },
+    "消息" : {
+
+    },
+    "状态" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Status"
+          }
+        }
+      }
+    },
+    "纠偏" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Steer"
+          }
+        }
+      }
+    },
+    "终态通知" : {
+
+    },
+    "设置" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Settings"
+          }
+        }
+      }
+    },
+    "还没有 Host" : {
+
+    },
+    "还没有任务" : {
+
+    },
+    "还没有拉取到 Host 能力" : {
+
+    },
+    "还没有用户消息" : {
+
+    },
+    "这不是 VibeX 邀请" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This is not a VibeX invitation"
+          }
+        }
+      }
+    },
+    "这个项目还没有工作区" : {
+
+    },
+    "这台设备" : {
+
+    },
+    "连接到你的 VibeX" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connect to your VibeX"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "连接到你的 VibeX"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

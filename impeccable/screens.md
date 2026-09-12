@@ -2,7 +2,7 @@
 
 布局骨架。文案见 [`copy.md`](./copy.md)，行为见 [`PRD/03-functional.md`](../PRD/03-functional.md)。
 
-所有已配对屏：顶栏有 **连接 chip**（状态 · 档案名）。背景是 `CompanionBackground`。水平边距 16pt。
+所有已配对屏：顶栏有 **连接 chip**（仅状态词，如「在线」）。点按弹出当前 Host 地址（origin），不显示 host ID。背景是 `CompanionBackground`。水平边距 16pt。
 
 ## 开屏
 
@@ -44,8 +44,9 @@ Search + 近 3/7/30 FilterChip
 可选：N 条待你处理               // warning 底，点进第一条
 分组列表（置顶 / 今天 / 昨天 / 本周 / 更早）
   Agent 头像 + 状态点
-  标题
-  Agent · 四态 · 相对时间
+  会话名
+  工作区 · Agent · 四态
+  右侧相对时间
 FAB 新会话                      // 仅 online；tab bar 之上
 ```
 
@@ -60,29 +61,28 @@ FAB 新会话                      // 仅 online；tab bar 之上
 全屏 NavigationStack。Tab bar 隐藏。边缘返回保留。
 
 ```
-[返回]  会话标题
-        项目 · Agent · 相对状态
-[连接 / Agent 状态]
-
+[返回]  居中截断标题           [Agent 头像] [三横杠]
 Lazy transcript
-  rail | rows
+  过程折叠「已折叠 N 条过程消息」
+  用户气泡靠右 / 助手 Markdown / 工具组 / 等待转圈
+悬浮球（默认可拖，贴边）：消息列表 / 任务列表
+底部中央 ↓ 圆钮（未贴底时）
 
 safeAreaInset:
-  可选：待审批 amber 提示行
-  可选：队列 / 纠偏条
-  ComposeBar
+  可选：待审批卡片
+  可选：队列 / 纠偏 pill
+  ComposeBar（占位「发送消息，输入 / @ # &」，摘要 chip，用量环，发送/停止）
 ```
 
-用户在底部附近才跟随滚动。否则右下玻璃 pill「↓ 新消息」。标题 tap 打开 SessionInfoSheet。
+用户在底部附近才跟随滚动。三横杠打开 SessionInfoSheet。摘要 chip 打开 Agent 选项。左缘返回手势保留；悬浮球默认贴右侧。
 
 ## 状态
 
 ```
 Header: 状态                     [连接 chip]
-四个可折叠 section
+四个可折叠看板（色胶囊标题 + 圆形计数）
   待开始 / 进行中 / 待检查 / 已完成
-  计数胶囊
-  会话卡：标题、相对时间、分支
+  会话卡：Agent 头像、会话名、工作区、相对时间、状态
 ```
 
 未选项目走空态。卡片 tap 进时间线。
