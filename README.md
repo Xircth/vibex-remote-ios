@@ -17,6 +17,19 @@ VibeX Host 家族的 **iOS 伴随端**：纯原生 Swift / SwiftUI 薄客户端�
 
 显示名 **VibeX**，Bundle ID `dev.vibex.companion`。
 
+## 下载与安装
+
+安装包在 [GitHub Releases](https://github.com/Xircth/vibex-remote-ios/releases/latest)，产物是 `.ipa`。这是测试阶段的侧载包，不经过 App Store。
+
+iOS 不允许像 Android APK 那样直接点开安装。用电脑把 IPA 签到你的设备上：
+
+| 方式 | 说明 |
+| --- | --- |
+| [AltStore](https://altstore.io) / [SideStore](https://sidestore.io) | 用你自己的 Apple ID 重签，免费账号约 7 天需刷新 |
+| [Sideloadly](https://sideloadly.io) | 在 Mac / Windows 上把 IPA 装进已连接的 iPhone |
+
+包名 `dev.vibex.companion`，需要 iOS 18 或更高。还要有一台正在运行、协议为 Remote v1 的 VibeX Host；手机访问的是局域网或隧道地址，不要填 Host 本机的 `127.0.0.1`。
+
 ## 构建
 
 CompanionCore（本机可跑）：
