@@ -8,7 +8,6 @@ enum CollabNavRoute: Hashable {
 
 struct CollaborationSpaceView: View {
     let client: HostClient
-    var onChromeHiddenChange: ((Bool) -> Void)? = nil
 
     @State private var projects: [ProjectSummary] = []
     @State private var selectedProjectID: String = ""
@@ -74,6 +73,9 @@ struct CollaborationSpaceView: View {
             .navigationTitle("协作空间")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    SidebarButton()
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     if !orderedProjects.isEmpty {
                         Menu {
@@ -207,12 +209,6 @@ struct CollaborationSpaceView: View {
                 }
                 renamingGroup = nil
             }
-        }
-        .onAppear {
-            onChromeHiddenChange?(!path.isEmpty)
-        }
-        .onChange(of: path.count) { _, count in
-            onChromeHiddenChange?(count > 0)
         }
         .task {
             while !Task.isCancelled {

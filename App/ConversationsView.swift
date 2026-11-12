@@ -16,12 +16,10 @@ private struct StarterSuggestion: Identifiable {
 /// Root of the "对话" tab:
 /// - Main canvas is calm and focused: either the minimal AI Chat Landing view (`activeConversation == nil`)
 ///   or the active conversation (`ConversationDetailView`).
-/// - Slide-out Sidebar Drawer houses Recent Conversations and Project Files in one dedicated place.
+/// - Slide-out Sidebar Drawer houses app navigation, Recent Conversations and Project Files.
 struct ConversationsView: View {
     let client: HostClient
-    var onChromeHiddenChange: ((Bool) -> Void)? = nil
-    var onLaunchRevealedChange: ((Bool) -> Void)? = nil
-    var onSelectTab: ((AppTab) -> Void)? = nil
+    @Binding var selection: AppTab
     @Environment(CompanionAttentionCenter.self) private var attentionCenter: CompanionAttentionCenter?
 
     @State private var list = RemoteList<ConversationListItem>()
@@ -85,10 +83,6 @@ struct ConversationsView: View {
         list.errorMessage == nil && list.items != nil
     }
 
-    private var shouldHideBottomChrome: Bool {
-        isSidebarOpen || activeConversation != nil || composerMenu != nil
-    }
-
     private var visibleConversations: [ConversationListItem] {
         (list.items ?? []).filter { !removedConversationIDs.contains($0.id) }
     }
@@ -140,7 +134,7 @@ struct ConversationsView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .leading) {
+        SidebarDrawer(isOpen: $isSidebarOpen) {
             Group {
                 if let activeConversation {
                     NavigationStack {
@@ -165,40 +159,9 @@ struct ConversationsView: View {
                     landingWorkspaceView
                 }
             }
-            .disabled(isSidebarOpen)
-
-            if isSidebarOpen {
-                Color.black.opacity(0.36)
-                    .ignoresSafeArea()
-                    .onTapGesture {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                            isSidebarOpen = false
-                            dismissKeyboard()
-                        }
-                    }
-                    .transition(.opacity)
-                    .zIndex(1)
-
-                sidebarDrawer
-                    .transition(.move(edge: .leading))
-                    .zIndex(2)
-            }
+        } drawer: {
+            sidebarDrawer
         }
-        .gesture(
-            DragGesture(minimumDistance: 24, coordinateSpace: .local)
-                .onEnded { value in
-                    if !isSidebarOpen && value.startLocation.x < 32 && value.translation.width > 64 {
-                        dismissKeyboard()
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                            isSidebarOpen = true
-                        }
-                    } else if isSidebarOpen && value.translation.width < -60 {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                            isSidebarOpen = false
-                        }
-                    }
-                }
-        )
         .sheet(item: $activeFileBrowserWorkspace) { target in
             FileBrowserView(client: client, workspaceID: target.workspaceID)
         }
@@ -222,15 +185,11 @@ struct ConversationsView: View {
         }
         .onAppear {
             consumePendingNavigationIfNeeded()
-            onChromeHiddenChange?(shouldHideBottomChrome)
             if !launchLogoEntered {
                 withAnimation(.easeOut(duration: 0.36)) {
                     launchLogoEntered = true
                 }
             }
-        }
-        .onChange(of: shouldHideBottomChrome) { _, hidden in
-            onChromeHiddenChange?(hidden)
         }
         .onChange(of: actionErrorMessage) { _, msg in
             guard msg != nil else { return }
@@ -267,7 +226,6 @@ struct ConversationsView: View {
             withAnimation(.spring(response: 1.08, dampingFraction: 0.86, blendDuration: 0.2)) {
                 isLaunchRevealed = true
             }
-            onLaunchRevealedChange?(true)
         }
         .task {
             while !Task.isCancelled {
@@ -370,23 +328,7 @@ struct ConversationsView: View {
 
     private var landingTopBar: some View {
         HStack {
-            Button {
-                dismissKeyboard()
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                    isSidebarOpen.toggle()
-                }
-            } label: {
-                Image(systemName: "sidebar.left")
-                    .font(.system(size: 16.5, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .frame(width: 36, height: 36)
-                    .background(
-                        Circle()
-                            .fill(Color(.secondarySystemGroupedBackground))
-                    )
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("打开侧边栏")
+            SidebarButton()
 
             Spacer()
 
@@ -486,10 +428,16 @@ struct ConversationsView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    // MARK: - Slide-Out Sidebar Drawer (Recent Conversations + Project Files)
+    // MARK: - Slide-Out Sidebar Drawer (Navigation + Recent Conversations + Project Files)
 
     private var sidebarDrawer: some View {
         VStack(alignment: .leading, spacing: 0) {
+            AppNavigationSection(selection: $selection) {
+                isSidebarOpen = false
+            }
+
+            Divider().opacity(0.45)
+
             // Sidebar top bar: segmented switcher + New Chat button
             HStack(spacing: 8) {
                 HStack(spacing: 3) {
@@ -592,45 +540,6 @@ struct ConversationsView: View {
                 await reload()
             }
         }
-        .frame(width: 304)
-        .frame(maxHeight: .infinity)
-        .background(
-            Color(.secondarySystemGroupedBackground)
-                .ignoresSafeArea()
-        )
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(Color.primary.opacity(0.07))
-                .frame(width: 0.5)
-                .ignoresSafeArea()
-        }
-        .shadow(color: .black.opacity(0.18), radius: 18, x: 5, y: 0)
-    }
-
-    private func sidebarQuickNavButton(
-        title: String,
-        icon: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 14.5, weight: .medium))
-                    .frame(height: 18)
-                Text(title)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(.tertiarySystemFill).opacity(0.65))
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: Sidebar Tab 1: 最近对话

@@ -19,7 +19,6 @@ private struct CardChip: ViewModifier {
 
 struct BoardView: View {
     let client: HostClient
-    var onChromeHiddenChange: ((Bool) -> Void)? = nil
 
     @State private var viewMode: KanbanViewMode = .columns
     @State private var projects: [ProjectSummary] = []
@@ -70,6 +69,11 @@ struct BoardView: View {
             .navigationTitle(viewMode == .columns ? "看板" : "计量统计")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if viewMode == .columns {
+                        SidebarButton()
+                    }
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     if viewMode == .columns {
                         projectSelectorMenu
@@ -176,12 +180,6 @@ struct BoardView: View {
             } message: { target in
                 Text("确定删除会话“\(target.resolvedTitle)”吗？正在执行中的会话不会被删除。")
             }
-        }
-        .onAppear {
-            onChromeHiddenChange?(!path.isEmpty)
-        }
-        .onChange(of: path.count) { _, count in
-            onChromeHiddenChange?(count > 0)
         }
         .task {
             while !Task.isCancelled {
@@ -291,7 +289,7 @@ struct BoardView: View {
                         }
                         .scrollTargetLayout()
                         .padding(.top, 10 + min(pullOffset * 0.35, 42))
-                        .padding(.bottom, 86)
+                        .padding(.bottom, 16)
                     }
                     .contentMargins(.horizontal, 16, for: .scrollContent)
                     .scrollTargetBehavior(.viewAligned)

@@ -210,6 +210,11 @@ struct SettingsView: View {
             .contentMargins(.top, 4, for: .scrollContent)
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    SidebarButton()
+                }
+            }
         }
     }
 

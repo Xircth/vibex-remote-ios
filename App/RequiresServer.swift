@@ -1,7 +1,7 @@
 import CompanionCore
 import SwiftUI
 
-/// Gate for tabs that read from the paired computer.
+/// Gate for destinations that read from the paired computer.
 struct RequiresServer<Content: View>: View {
     @Environment(ServerStore.self) private var servers
     @Binding var selection: AppTab
@@ -11,7 +11,14 @@ struct RequiresServer<Content: View>: View {
         if let profile = servers.activeProfile, servers.isSessionConnected, let client = servers.client(for: profile) {
             content(client)
         } else {
-            ConnectComputerEmptyState()
+            AppNavigationDrawer(selection: $selection) {
+                ConnectComputerEmptyState()
+                    .overlay(alignment: .topLeading) {
+                        SidebarButton()
+                            .padding(.horizontal, 14)
+                            .padding(.top, 6)
+                    }
+            }
         }
     }
 }

@@ -104,7 +104,6 @@ struct KanbanUsageDashboardView: View {
                         }
                     }
                     .padding(16)
-                    .padding(.bottom, 76)
                 }
                 .refreshable {
                     await reloadStatistics()
