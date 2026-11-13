@@ -7,54 +7,70 @@ struct RequiresServer<Content: View>: View {
     @Binding var selection: AppTab
     @ViewBuilder let content: (HostClient) -> Content
 
-    @State private var showingScannerPair = false
-    @State private var showingManualPair = false
+    var body: some View {
+        if let profile = servers.activeProfile, servers.isSessionConnected, let client = servers.client(for: profile) {
+            content(client)
+        } else {
+            ConnectComputerEmptyState()
+        }
+    }
+}
+
+/// Shown while no computer is connected; one button resumes the account picker, a saved computer, or code pairing.
+struct ConnectComputerEmptyState: View {
+    @Environment(ServerStore.self) private var servers
+    @Environment(VibeXAccountStore.self) private var account
+    @Environment(DesktopConnectFlow.self) private var connectFlow
+
+    private var isSyncingAccount: Bool {
+        account.isSignedIn && account.desktops.isEmpty && (account.isLoading || account.isSyncingHosts)
+    }
 
     var body: some View {
-        Group {
-            if let profile = servers.activeProfile {
-                if let client = servers.client(for: profile) {
-                    content(client)
-                } else {
-                    ContentUnavailableView {
-                        Label("连接凭据已失效", systemImage: "key.slash")
-                    } actions: {
-                        HStack(spacing: 12) {
-                            Button("扫码重新配对", systemImage: "qrcode.viewfinder") {
-                                showingScannerPair = true
-                            }
-                            .buttonStyle(.borderedProminent)
-
-                            Button("连接码配对") {
-                                showingManualPair = true
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                }
+        VStack(spacing: 16) {
+            if isSyncingAccount {
+                LoadingState(label: "正在同步你的电脑")
             } else {
-                ContentUnavailableView {
-                    Label("尚未连接电脑", systemImage: "desktopcomputer")
-                } actions: {
-                    HStack(spacing: 12) {
-                        Button("扫码配对", systemImage: "qrcode.viewfinder") {
-                            showingScannerPair = true
-                        }
-                        .buttonStyle(.borderedProminent)
+                Image(systemName: "desktopcomputer")
+                    .font(.system(size: 38, weight: .regular))
+                    .foregroundStyle(Color.secondary)
 
-                        Button("连接码配对") {
-                            showingManualPair = true
-                        }
-                        .buttonStyle(.bordered)
-                    }
+                if let message = servers.pairingError, !message.isEmpty {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                 }
+
+                Button {
+                    connect()
+                } label: {
+                    Text("连接电脑")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: 220)
+                        .padding(.vertical, 11)
+                        .background(
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .fill(Color.accentColor)
+                        )
+                }
+                .buttonStyle(.plain)
             }
         }
-        .sheet(isPresented: $showingScannerPair) {
-            PairView(startWithScanner: true, initialOrigin: servers.activeProfile?.origin)
-        }
-        .sheet(isPresented: $showingManualPair) {
-            PairView(startWithScanner: false, initialOrigin: servers.activeProfile?.origin)
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemGroupedBackground))
+    }
+
+    private func connect() {
+        servers.pairingError = nil
+        if account.isSignedIn {
+            connectFlow.presentPicker(servers: servers)
+        } else if let profile = servers.activeProfile, servers.client(for: profile) != nil {
+            servers.connectSavedProfile(profile)
+        } else {
+            connectFlow.isCodePairingPresented = true
         }
     }
 }

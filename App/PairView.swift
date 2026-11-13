@@ -9,233 +9,237 @@ struct PairView: View {
     var startWithScanner: Bool = false
     var initialOrigin: String? = nil
 
-    @State private var code = ""
-    @State private var origin = ""
-    @State private var deviceName = UIDevice.current.name
-    @State private var busy = false
-    @State private var scanning = false
-    @State private var didApplyInitialState = false
-    @State private var errorMessage: String?
-
-    private var trimmedCode: String {
-        code.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var isInvitation: Bool {
-        PairingInvitation.looksLikeInvitation(trimmedCode)
-    }
-
-    private var parsedInvitationHost: String? {
-        guard isInvitation,
-              let invitation = try? PairingInvitation.parse(trimmedCode),
-              let firstOrigin = invitation.candidateOrigins.first?.value
-        else { return nil }
-        return firstOrigin
-    }
-
-    private var canSubmit: Bool {
-        guard !busy, !trimmedCode.isEmpty else { return false }
-        return isInvitation || !origin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var recentOrigins: [String] {
-        var seen = Set<String>()
-        var result: [String] = []
-        for profile in servers.profiles.reversed() {
-            if seen.insert(profile.origin).inserted {
-                result.append(profile.origin)
-            }
-        }
-        return result
-    }
-
     var body: some View {
         NavigationStack {
-            Form {
-                // 1. Primary QR Scan Action
-                Section {
-                    Button {
-                        errorMessage = nil
-                        scanning = true
-                    } label: {
-                        HStack(spacing: 12) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(Color.accentColor.opacity(0.15))
-                                    .frame(width: 40, height: 40)
-                                Image(systemName: "qrcode.viewfinder")
-                                    .font(.system(size: 19, weight: .semibold))
-                                    .foregroundStyle(Color.accentColor)
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("扫码配对")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.primary)
-                                Text("对准桌面端二维码即可自动识别连接")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.vertical, 2)
-                    }
-                }
-
-                // 2. Connection Code Input
-                Section("连接码") {
-                    HStack(spacing: 8) {
-                        TextField("输入 8 位连接码或粘贴完整邀请码", text: $code)
-                            .textInputAutocapitalization(.characters)
-                            .autocorrectionDisabled()
-                            .font(.subheadline.monospaced())
-
-                        if !code.isEmpty {
-                            Button {
-                                code = ""
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .buttonStyle(.borderless)
-                        }
-
-                        Button {
-                            pasteFromClipboard()
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "doc.on.clipboard")
-                                Text("粘贴")
-                            }
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
-                            .foregroundStyle(Color.accentColor)
-                        }
-                        .buttonStyle(.borderless)
-                    }
-
-                    if let host = parsedInvitationHost {
-                        LabeledContent("识别到的电脑地址") {
-                            Text(host)
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                // 3. Host Address (Only needed when using a short code instead of a full invitation)
-                if !isInvitation {
-                    Section("电脑地址") {
-                        TextField("例如 192.168.1.2 或 http://192.168.1.2:17891", text: $origin)
-                            .keyboardType(.URL)
-                            .textContentType(.URL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(.subheadline.monospaced())
-
-                        if !recentOrigins.isEmpty {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 8) {
-                                    ForEach(recentOrigins, id: \.self) { savedOrigin in
-                                        let isSelected = ServerStore.normalizeOrigin(origin) == savedOrigin
-                                        Button {
-                                            origin = savedOrigin
-                                        } label: {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: isSelected ? "checkmark.circle.fill" : "clock.arrow.circlepath")
-                                                    .font(.system(size: 11, weight: .semibold))
-                                                Text(savedOrigin)
-                                                    .font(.caption2.monospaced())
-                                            }
-                                            .padding(.horizontal, 10)
-                                            .padding(.vertical, 5)
-                                            .background(
-                                                Capsule()
-                                                    .fill(
-                                                        isSelected
-                                                            ? Color.accentColor.opacity(0.16)
-                                                            : Color.secondary.opacity(0.12)
-                                                    )
-                                            )
-                                            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                                        }
-                                        .buttonStyle(.plain)
-                                    }
-                                }
-                                .padding(.vertical, 2)
-                            }
-                        }
-                    }
-                }
-
-                // 4. Device Name
-                Section("本机名称") {
-                    TextField("设备名称", text: $deviceName)
-                        .font(.subheadline)
-                }
-
-                if let errorMessage {
-                    Section {
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.red)
-                            Text(errorMessage)
-                                .font(.footnote)
-                                .foregroundStyle(.red)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("配对电脑")
+            PairingCodeForm(
+                startWithScanner: startWithScanner,
+                initialOrigin: initialOrigin,
+                onPaired: { dismiss() }
+            )
+            .navigationTitle("使用连接码配对")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    if busy {
-                        ProgressView()
-                    } else {
-                        Button("配对", action: submit)
-                            .fontWeight(.semibold)
-                            .disabled(!canSubmit)
+            }
+            .onAppear { servers.isPresentingPairSheet = true }
+            .onDisappear { servers.isPresentingPairSheet = false }
+        }
+    }
+}
+
+/// Pairs with a desktop through its one-time connection code or QR invitation; works without a VibeX account.
+struct PairingCodeForm: View {
+    @Environment(ServerStore.self) private var servers
+    var startWithScanner: Bool = false
+    var initialOrigin: String? = nil
+    var onPaired: () -> Void
+
+    @State private var quickCode = ""
+    @State private var scanning = false
+    @State private var submittingCode = false
+    @State private var localError: String?
+    @State private var localMobileConflict: PendingMobileConflict?
+    @State private var didAppear = false
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                Spacer(minLength: 24)
+
+                Image(systemName: "qrcode.viewfinder")
+                    .font(.system(size: 38, weight: .regular))
+                    .foregroundStyle(Color.secondary)
+
+                inlineCodeAndScanCard
+
+                if let errorText = localError, !errorText.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                        Text(errorText)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.leading)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.red.opacity(0.08))
+                    )
+                }
+
+                Spacer(minLength: 24)
+            }
+            .frame(maxWidth: 380)
+            .padding(.horizontal, 24)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background(Color(.systemGroupedBackground))
+        .fullScreenCover(isPresented: $scanning) {
+            scannerSheet
+        }
+        .alert(
+            "选择要远程连接的手机",
+            isPresented: Binding(
+                get: { localMobileConflict != nil },
+                set: { if !$0 { localMobileConflict = nil } }
+            ),
+            presenting: localMobileConflict
+        ) { conflict in
+            Button("使用「\(conflict.currentDeviceName)」（本机）", role: .destructive) {
+                let action = conflict.retryAction
+                localMobileConflict = nil
+                Task { @MainActor in
+                    await action()
                 }
             }
-            .interactiveDismissDisabled(busy)
-            .fullScreenCover(isPresented: $scanning) { scanner }
-            .onAppear {
-                guard !didApplyInitialState else { return }
-                didApplyInitialState = true
-                if let initialOrigin, !initialOrigin.isEmpty {
-                    origin = initialOrigin
-                } else if origin.isEmpty, let lastOrigin = servers.activeProfile?.origin {
-                    origin = lastOrigin
-                }
-                if startWithScanner {
-                    scanning = true
-                }
+            Button("保留「\(conflict.existingDeviceName)」", role: .cancel) {
+                localMobileConflict = nil
+            }
+        } message: { conflict in
+            Text("同一台电脑仅限一台手机远程连接。当前电脑已连接「\(conflict.existingDeviceName)」，若切换为本机连接，「\(conflict.existingDeviceName)」将被强制下线并清除凭据，下次需重新连接。")
+        }
+        .onChange(of: servers.connectionSuccessCount) { _, _ in
+            onPaired()
+        }
+        .onAppear {
+            guard !didAppear else { return }
+            didAppear = true
+            if startWithScanner {
+                scanning = true
             }
         }
     }
 
-    private var scanner: some View {
+    private var inlineCodeAndScanCard: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    TextField("输入 8 位连接码或粘贴邀请", text: $quickCode)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                        .font(.system(size: 13.5, weight: .medium, design: .monospaced))
+                        .submitLabel(.go)
+                        .onSubmit {
+                            submitQuickCode()
+                        }
+
+                    if !quickCode.isEmpty {
+                        Button {
+                            quickCode = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 9)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color(.systemGroupedBackground))
+                )
+
+                if quickCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button {
+                        pasteAndPairIfInvitation()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "doc.on.clipboard")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("粘贴")
+                                .font(.system(size: 12.5, weight: .semibold))
+                        }
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.accentColor.opacity(0.12))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button {
+                        submitQuickCode()
+                    } label: {
+                        if submittingCode {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                        } else {
+                            Text("连接")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                        }
+                    }
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.accentColor)
+                    )
+                    .buttonStyle(.plain)
+                    .disabled(submittingCode)
+                }
+            }
+
+            Button {
+                localError = nil
+                scanning = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "qrcode.viewfinder")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text("扫码配对")
+                        .font(.system(size: 14.5, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.accentColor)
+                )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
+                )
+        )
+    }
+
+    private var scannerSheet: some View {
         NavigationStack {
             QRScannerView(
                 onCode: { text in
                     let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    code = cleaned
+                    quickCode = cleaned
                     scanning = false
-                    if PairingInvitation.looksLikeInvitation(cleaned) || !origin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        submit()
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 350_000_000)
+                        submitQuickCode(overrideInput: cleaned)
                     }
                 },
                 onFailure: { message in
-                    errorMessage = message
+                    localError = message
                     scanning = false
                 },
                 onManualInputTap: {
@@ -258,36 +262,42 @@ struct PairView: View {
         }
     }
 
-    private func pasteFromClipboard() {
+    private func pasteAndPairIfInvitation() {
         guard let pasted = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !pasted.isEmpty
+        !pasted.isEmpty
         else { return }
-        code = pasted
-        errorMessage = nil
+        quickCode = pasted
+        localError = nil
         if PairingInvitation.looksLikeInvitation(pasted) {
-            submit()
+            submitQuickCode(overrideInput: pasted)
         }
     }
 
-    private func submit() {
-        guard canSubmit else { return }
-        busy = true
-        errorMessage = nil
-        let input = trimmedCode
-        Task {
+    private func submitQuickCode(overrideInput: String? = nil) {
+        let input = (overrideInput ?? quickCode).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty, !submittingCode else { return }
+        submittingCode = true
+        localError = nil
+        servers.pairingError = nil
+        Task { @MainActor in
             do {
-                try await servers.pair(input: input, manualOrigin: origin, deviceName: deviceName)
+                try await servers.pair(
+                    input: input,
+                    manualOrigin: initialOrigin ?? "",
+                    deviceName: UIDevice.current.name,
+                    onConflict: { conflict in
+                        localMobileConflict = conflict
+                    }
+                )
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
-                dismiss()
+                submittingCode = false
+            } catch PairingError.mobileDeviceConflict {
+                submittingCode = false
             } catch {
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
-                errorMessage = error.localizedDescription
-                busy = false
+                localError = ServerStore.sanitizeError(error)
+                submittingCode = false
             }
         }
     }
-}
-
-#Preview {
-    PairView().environment(ServerStore(defaults: UserDefaults(suiteName: "preview")!))
 }

@@ -34,6 +34,8 @@ struct ConversationsView: View {
 
     // Active conversation shown in the main canvas (`nil` = New Chat Landing view)
     @State private var activeConversation: ConversationListItem?
+    @State private var didSyncInitialDesktopConversation = false
+    @State private var userRequestedNewChatLanding = false
 
     // Sidebar state
     @State private var isSidebarOpen = false
@@ -49,6 +51,8 @@ struct ConversationsView: View {
     @State private var selectedProjectID: String?
     @State private var selectedAgentID: String?
     @State private var selectedModelChoiceID: String?
+    @State private var customModelName: String?
+    @AppStorage("vibex.customRelayModels") private var savedCustomModelsRaw = ""
     @State private var selectedAccessModeID: String?
     @State private var selectedEffortIndex: Int?
     @State private var draft = ""
@@ -79,6 +83,10 @@ struct ConversationsView: View {
 
     private var isConnected: Bool {
         list.errorMessage == nil && list.items != nil
+    }
+
+    private var shouldHideBottomChrome: Bool {
+        isSidebarOpen || activeConversation != nil || composerMenu != nil
     }
 
     private var visibleConversations: [ConversationListItem] {
@@ -146,6 +154,7 @@ struct ConversationsView: View {
                             },
                             onReturnToLanding: {
                                 withAnimation(.smooth(duration: 0.2)) {
+                                    self.userRequestedNewChatLanding = true
                                     self.activeConversation = nil
                                 }
                             }
@@ -213,18 +222,43 @@ struct ConversationsView: View {
         }
         .onAppear {
             consumePendingNavigationIfNeeded()
-            onChromeHiddenChange?(isSidebarOpen)
+            onChromeHiddenChange?(shouldHideBottomChrome)
             if !launchLogoEntered {
                 withAnimation(.easeOut(duration: 0.36)) {
                     launchLogoEntered = true
                 }
             }
         }
-        .onChange(of: isSidebarOpen) { _, _ in
-            onChromeHiddenChange?(isSidebarOpen)
+        .onChange(of: shouldHideBottomChrome) { _, hidden in
+            onChromeHiddenChange?(hidden)
+        }
+        .onChange(of: actionErrorMessage) { _, msg in
+            guard msg != nil else { return }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(3200))
+                if !Task.isCancelled {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        actionErrorMessage = nil
+                    }
+                }
+            }
         }
         .onChange(of: attentionCenter?.pendingNavigationConversation) { _, _ in
             consumePendingNavigationIfNeeded()
+        }
+        .onChange(of: attentionCenter?.latestConversations) { _, updated in
+            guard let updated, !updated.isEmpty else { return }
+            syncWithFetchedConversations(updated)
+        }
+        .onChange(of: attentionCenter?.latestNewlyCreatedConversation) { _, newConv in
+            guard let newConv else { return }
+            Task { await reload() }
+            if activeConversation == nil && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                userRequestedNewChatLanding = false
+                withAnimation(.smooth(duration: 0.22)) {
+                    activeConversation = newConv
+                }
+            }
         }
         .task {
             guard !isLaunchRevealed else { return }
@@ -449,6 +483,7 @@ struct ConversationsView: View {
             }
             .padding(.horizontal, 14)
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: - Slide-Out Sidebar Drawer (Recent Conversations + Project Files)
@@ -489,6 +524,7 @@ struct ConversationsView: View {
 
                 Button {
                     withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+                        userRequestedNewChatLanding = true
                         activeConversation = nil
                         isSidebarOpen = false
                     }
@@ -555,31 +591,6 @@ struct ConversationsView: View {
             .refreshable {
                 await reload()
             }
-
-            Divider().opacity(0.45)
-
-            HStack(spacing: 4) {
-                sidebarQuickNavButton(title: "新工作台", icon: "sparkles") {
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
-                        activeConversation = nil
-                        isSidebarOpen = false
-                    }
-                }
-                sidebarQuickNavButton(title: "看板", icon: "square.grid.2x2") {
-                    isSidebarOpen = false
-                    onSelectTab?(.board)
-                }
-                sidebarQuickNavButton(title: "协作空间", icon: "person.2") {
-                    isSidebarOpen = false
-                    onSelectTab?(.space)
-                }
-                sidebarQuickNavButton(title: "设置", icon: "gearshape") {
-                    isSidebarOpen = false
-                    onSelectTab?(.settings)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
         }
         .frame(width: 304)
         .frame(maxHeight: .infinity)
@@ -668,6 +679,7 @@ struct ConversationsView: View {
         let isCurrent = activeConversation?.id == item.id
         return Button {
             withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+                userRequestedNewChatLanding = false
                 activeConversation = item
                 isSidebarOpen = false
             }
@@ -864,13 +876,66 @@ struct ConversationsView: View {
 
     // MARK: - Landing PromptBar Integration
 
+    private var savedCustomModels: [String] {
+        savedCustomModelsRaw
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func rememberCustomModel(_ name: String) {
+        var current = savedCustomModels.filter { $0.caseInsensitiveCompare(name) != .orderedSame }
+        current.insert(name, at: 0)
+        if current.count > 8 {
+            current = Array(current.prefix(8))
+        }
+        savedCustomModelsRaw = current.joined(separator: ",")
+    }
+
+    private var landingAgentChoices: [PromptChoice] {
+        let activeID = currentAgent?.id ?? "claude_code"
+        let list = usableAgents.isEmpty
+            ? [
+                CatalogAgent(id: "claude_code", displayName: "Claude Code", usable: true, currentModeID: nil, modes: [], options: []),
+                CatalogAgent(id: "codex", displayName: "Codex", usable: true, currentModeID: nil, modes: [], options: []),
+                CatalogAgent(id: "antigravity", displayName: "Antigravity", usable: true, currentModeID: nil, modes: [], options: []),
+            ]
+            : usableAgents
+        return list.map { item in
+            PromptChoice(
+                id: item.id,
+                title: AgentBrand.displayName(item.id, hostName: item.displayName),
+                agentID: item.id,
+                selected: item.id == activeID
+            )
+        }
+    }
+
+    private var landingCurrentAgentLabel: String {
+        if let agent = currentAgent {
+            return AgentBrand.displayName(agent.id, hostName: agent.displayName)
+        }
+        return "Claude Code"
+    }
+
     private var landingModelChoices: [PromptChoice] {
-        guard let agent = currentAgent else { return [] }
+        let agent = currentAgent ?? CatalogAgent(
+            id: selectedAgentID ?? "claude_code",
+            displayName: "Claude Code",
+            usable: true,
+            currentModeID: nil,
+            modes: [],
+            options: []
+        )
         let options = agent.modelOptions
-        let choices = options.flatMap { option in
+        var choices: [PromptChoice] = options.flatMap { option in
             option.choices.map { choice in
-                let id = "\(agent.id)|\(option.key)|\(choice.id)"
-                let isDefaultSelected = selectedModelChoiceID == nil && choice.value == option.value
+                let valueStr: String = {
+                    if case .string(let s) = choice.value, !s.isEmpty { return s }
+                    return choice.label
+                }()
+                let id = "\(agent.id)|\(option.key)|\(valueStr)"
+                let isDefaultSelected = selectedModelChoiceID == nil && customModelName == nil && choice.value == option.value
                 return PromptChoice(
                     id: id,
                     title: choice.label,
@@ -880,43 +945,44 @@ struct ConversationsView: View {
                 )
             }
         }
-        if choices.isEmpty {
-            return usableAgents.map { item in
-                PromptChoice(
-                    id: "agent|\(item.id)",
-                    title: AgentBrand.displayName(item.id, hostName: item.displayName),
-                    agentID: item.id,
-                    selected: item.id == agent.id
+        for custom in savedCustomModels {
+            let customID = "\(agent.id)|model|\(custom)"
+            if !choices.contains(where: { $0.id == customID || $0.title.caseInsensitiveCompare(custom) == .orderedSame }) {
+                choices.append(
+                    PromptChoice(
+                        id: customID,
+                        title: custom,
+                        tag: "自定义/中转",
+                        agentID: agent.id,
+                        selected: selectedModelChoiceID == customID || customModelName == custom
+                    )
                 )
             }
+        }
+        if let firstIdx = choices.indices.first, !choices.contains(where: \.selected) {
+            choices[firstIdx].selected = true
         }
         return choices
     }
 
     private var landingOtherModelGroups: [PromptGroup] {
-        let currentID = currentAgent?.id
+        let currentID = currentAgent?.id ?? "claude_code"
         return usableAgents.filter { $0.id != currentID }.map { agent in
-            let modelItems = agent.modelOptions.flatMap(\.choices)
-            let choices: [PromptChoice] = modelItems.isEmpty
-                ? [
-                    PromptChoice(
-                        id: "switch-agent|\(agent.id)",
-                        title: AgentBrand.displayName(agent.id, hostName: agent.displayName),
-                        agentID: agent.id,
-                        selected: false,
-                        enabled: true
-                    ),
-                ]
-                : modelItems.map { choice in
-                    PromptChoice(
-                        id: "switch-agent|\(agent.id)|\(choice.id)",
-                        title: choice.label,
-                        tag: choice.description,
-                        agentID: agent.id,
-                        selected: false,
-                        enabled: true
-                    )
-                }
+            let modelOption = agent.modelOptions.first ?? CatalogAgent.fallbackModelOption(for: agent.id)
+            let choices: [PromptChoice] = modelOption.choices.map { choice in
+                let valueStr: String = {
+                    if case .string(let s) = choice.value, !s.isEmpty { return s }
+                    return choice.label
+                }()
+                return PromptChoice(
+                    id: "switch-agent|\(agent.id)|\(modelOption.key)|\(valueStr)",
+                    title: choice.label,
+                    tag: choice.description,
+                    agentID: agent.id,
+                    selected: false,
+                    enabled: true
+                )
+            }
             return PromptGroup(
                 title: AgentBrand.displayName(agent.id, hostName: agent.displayName),
                 agentID: agent.id,
@@ -926,6 +992,9 @@ struct ConversationsView: View {
     }
 
     private var landingCurrentModelLabel: String? {
+        if let customModelName, !customModelName.isEmpty {
+            return customModelName
+        }
         if let selectedID = selectedModelChoiceID,
            let match = landingModelChoices.first(where: { $0.id == selectedID }) {
             return match.title
@@ -933,10 +1002,19 @@ struct ConversationsView: View {
         if let firstSelected = landingModelChoices.first(where: \.selected) {
             return firstSelected.title
         }
-        if let agent = currentAgent {
-            return AgentBrand.displayName(agent.id, hostName: agent.displayName)
+        return landingModelChoices.first?.title ?? "默认模型"
+    }
+
+    private var resolvedSelectedModelKeyValue: (key: String, value: String)? {
+        if let customModelName, !customModelName.isEmpty {
+            let key = currentAgent?.modelOptions.first?.key ?? "model"
+            return (key, customModelName)
         }
-        return "Claude Code"
+        let targetID = selectedModelChoiceID ?? landingModelChoices.first(where: \.selected)?.id
+        guard let targetID else { return nil }
+        let parts = targetID.split(separator: "|", maxSplits: 2).map(String.init)
+        guard parts.count == 3 else { return nil }
+        return (parts[1], parts[2])
     }
 
     private var landingAccessChoices: [PromptChoice] {
@@ -956,36 +1034,36 @@ struct ConversationsView: View {
         return [
             PromptChoice(
                 id: "manual",
-                title: "Manual",
-                detail: "Always ask before making changes",
+                title: "手动审批",
+                detail: "每次修改前询问确认",
                 icon: "shield",
                 selected: activeID == "manual"
             ),
             PromptChoice(
                 id: "accept_edits",
-                title: "Accept edits",
-                detail: "Automatically accept all file edits",
+                title: "自动接受编辑",
+                detail: "自动接受所有文件编辑",
                 icon: "shield",
                 selected: activeID == "accept_edits"
             ),
             PromptChoice(
                 id: "plan",
-                title: "Plan",
-                detail: "Create a plan before making changes",
+                title: "仅规划",
+                detail: "执行前先生成规划方案",
                 icon: "shield",
                 selected: activeID == "plan"
             ),
             PromptChoice(
                 id: "auto",
-                title: "Auto",
-                detail: "Agent handles permission decisions",
+                title: "自动",
+                detail: "由 Agent 自动处理权限判断",
                 icon: "shield",
                 selected: activeID == "auto"
             ),
             PromptChoice(
                 id: "bypass",
-                title: "Bypass permissions",
-                detail: "Accepts all permissions",
+                title: "跳过权限",
+                detail: "自动通过所有权限请求",
                 icon: "shield",
                 selected: activeID == "bypass"
             ),
@@ -1006,7 +1084,7 @@ struct ConversationsView: View {
             let idx = min(max(selectedEffortIndex ?? defaultIdx, 0), option.choices.count - 1)
             return PromptEffort(levels: option.choices.map(\.label), index: idx)
         }
-        let levels = ["Low", "Medium", "High"]
+        let levels = ["低", "中", "高"]
         let idx = min(max(selectedEffortIndex ?? 1, 0), levels.count - 1)
         return PromptEffort(levels: levels, index: idx)
     }
@@ -1020,6 +1098,8 @@ struct ConversationsView: View {
             hasAlert: false,
             modelName: landingCurrentModelLabel,
             agentID: currentAgent?.id ?? "claude_code",
+            agentName: landingCurrentAgentLabel,
+            agentChoices: landingAgentChoices,
             modelChoices: landingModelChoices,
             otherModelGroups: landingOtherModelGroups,
             otherAgentNote: nil,
@@ -1038,20 +1118,40 @@ struct ConversationsView: View {
                 startNewConversation(with: draft)
             },
             stop: {},
+            pickAgent: { id in
+                selectedAgentID = id
+                selectedModelChoiceID = nil
+                customModelName = nil
+                composerMenu = nil
+            },
             pickModel: { id in
                 if id.hasPrefix("switch-agent|") {
-                    let parts = id.split(separator: "|").map(String.init)
-                    if parts.count >= 2 {
+                    let parts = id.split(separator: "|", maxSplits: 3).map(String.init)
+                    if parts.count == 4 {
                         selectedAgentID = parts[1]
+                        customModelName = nil
+                        selectedModelChoiceID = "\(parts[1])|\(parts[2])|\(parts[3])"
+                    } else if parts.count >= 2 {
+                        selectedAgentID = parts[1]
+                        customModelName = nil
                         selectedModelChoiceID = nil
                     }
                 } else if id.hasPrefix("agent|") {
                     selectedAgentID = String(id.dropFirst("agent|".count))
+                    customModelName = nil
                     selectedModelChoiceID = nil
                 } else {
+                    customModelName = nil
                     selectedModelChoiceID = id
                 }
                 composerMenu = nil
+            },
+            onAddCustomModel: { custom in
+                rememberCustomModel(custom)
+                customModelName = custom
+                let agentID = currentAgent?.id ?? "claude_code"
+                let key = currentAgent?.modelOptions.first?.key ?? "model"
+                selectedModelChoiceID = "\(agentID)|\(key)|\(custom)"
             },
             pickAccess: { id in
                 selectedAccessModeID = id
@@ -1072,6 +1172,19 @@ struct ConversationsView: View {
             return
         }
         let agentID = currentAgent?.id ?? visibleConversations.first?.agent_id ?? "claude_code"
+        let chosenModel = resolvedSelectedModelKeyValue
+        let chosenModeID = selectedAccessModeID
+        let chosenEffort: (key: String, value: JSONValue)? = {
+            if let option = landingEffortOption, option.choices.count > 1 {
+                let defaultIdx = option.choices.firstIndex(where: { $0.value == option.value }) ?? 0
+                let idx = min(max(selectedEffortIndex ?? defaultIdx, 0), option.choices.count - 1)
+                return (option.key, option.choices[idx].value)
+            }
+            guard let idx = selectedEffortIndex else { return nil }
+            let values = ["low", "medium", "high"]
+            let clamped = min(max(idx, 0), values.count - 1)
+            return ("reasoning_effort", .string(values[clamped]))
+        }()
 
         isCreatingAndSending = true
         actionErrorMessage = nil
@@ -1084,6 +1197,25 @@ struct ConversationsView: View {
                     workspaceID: workspaceID,
                     agentID: agentID
                 )
+                attentionCenter?.markLocallyCreatedConversation(created.id)
+                _ = try? await client.ensureSessionControls(conversationID: created.id)
+                if let chosenModeID, !chosenModeID.isEmpty {
+                    try? await client.setSessionMode(conversationID: created.id, modeID: chosenModeID)
+                }
+                if let chosenModel, !chosenModel.value.isEmpty, chosenModel.value != "default" {
+                    try? await client.setSessionConfigOption(
+                        conversationID: created.id,
+                        key: chosenModel.key,
+                        value: .string(chosenModel.value)
+                    )
+                }
+                if let chosenEffort {
+                    try? await client.setSessionConfigOption(
+                        conversationID: created.id,
+                        key: chosenEffort.key,
+                        value: chosenEffort.value
+                    )
+                }
                 try await client.sendMessage(
                     conversationID: created.id,
                     workspaceID: workspaceID,
@@ -1091,6 +1223,7 @@ struct ConversationsView: View {
                     text: trimmed
                 )
                 draft = ""
+                userRequestedNewChatLanding = false
                 withAnimation(.smooth(duration: 0.22)) {
                     activeConversation = created
                 }
@@ -1160,8 +1293,22 @@ struct ConversationsView: View {
         guard let target = attentionCenter?.pendingNavigationConversation else { return }
         attentionCenter?.pendingNavigationConversation = nil
         isSidebarOpen = false
+        userRequestedNewChatLanding = false
         withAnimation(.smooth(duration: 0.2)) {
             activeConversation = target
+        }
+    }
+
+    private func syncWithFetchedConversations(_ fetched: [ConversationListItem]) {
+        if let current = activeConversation,
+           let updated = fetched.first(where: { $0.id == current.id }) {
+            activeConversation = updated
+        } else if !didSyncInitialDesktopConversation && !userRequestedNewChatLanding,
+                  let initial = fetched.first(where: { !removedConversationIDs.contains($0.id) }) {
+            didSyncInitialDesktopConversation = true
+            withAnimation(.smooth(duration: 0.22)) {
+                activeConversation = initial
+            }
         }
     }
 
@@ -1220,10 +1367,7 @@ struct ConversationsView: View {
             )
             let activeIDs = Set(fetched.map(\.id))
             removedConversationIDs.formIntersection(activeIDs)
-            if let current = activeConversation,
-               let updated = fetched.first(where: { $0.id == current.id }) {
-                activeConversation = updated
-            }
+            syncWithFetchedConversations(fetched)
             return fetched
         }
     }

@@ -5,6 +5,10 @@ public struct PairingInvitation: Decodable, Equatable, Sendable {
     public struct Reachability: Decodable, Equatable, Sendable {
         public let origin: String
         public let kind: String
+
+        func isCloud(_ parsed: HostOrigin) -> Bool {
+            parsed.isCloud || kind.lowercased() == "published"
+        }
     }
 
     public static let prefix = "vibex-pairing:"
@@ -39,15 +43,22 @@ public struct PairingInvitation: Decodable, Equatable, Sendable {
         return fractional.date(from: expires_at) ?? plain.date(from: expires_at)
     }
 
-    /// Published HTTPS first, then the rest in Host order; loopback never reaches a phone.
+    /// Direct LAN (`http://`) origins first, then published (`https://`) fallback; loopback never reaches a phone.
     public var candidateOrigins: [HostOrigin] {
         let parsed = reachability.compactMap { item -> (HostOrigin, Bool)? in
             guard let origin = try? HostOrigin.parse(item.origin),
                   !Self.isLoopback(origin.value)
             else { return nil }
-            return (origin, origin.value.hasPrefix("https://"))
+            return (origin, item.isCloud(origin))
         }
-        return parsed.filter(\.1).map(\.0) + parsed.filter { !$0.1 }.map(\.0)
+        return parsed.filter { !$0.1 }.map(\.0) + parsed.filter(\.1).map(\.0)
+    }
+
+    /// The Host published no cloud origin, so only a phone on its LAN can reach it.
+    public var offersOnlyLocalOrigins: Bool {
+        !reachability.contains { item in
+            (try? HostOrigin.parse(item.origin)).map(item.isCloud) ?? false
+        }
     }
 
     private static func isLoopback(_ origin: String) -> Bool {

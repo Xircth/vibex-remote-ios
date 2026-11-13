@@ -8,6 +8,7 @@ struct ConversationDetailView: View {
     @State private var panel: DetailPanel?
     @State private var created: ConversationListItem?
     @State private var diffChange: FileChangeItem?
+    @AppStorage("vibex.customRelayModels") private var customRelayModelsJSON: String = "[]"
 
     // Scroll safe-zone & floating bottom indicator state
     @State private var distanceFromBottom: CGFloat = 0
@@ -15,8 +16,14 @@ struct ConversationDetailView: View {
     @State private var isUserDraggingScroll = false
     @State private var unreadMessageUpdates = 0
     @State private var hasPerformedInitialScroll = false
+    @State private var workspaceDiffCount = 0
 
     private let bottomSafeZoneThreshold: CGFloat = 56
+
+    private var totalChangeCount: Int {
+        let turnChanges = Set(model.items.flatMap(\.changes).map(\.path)).count
+        return max(workspaceDiffCount, turnChanges)
+    }
 
     private var isInBottomSafeZone: Bool {
         !userDetachedFromBottom && !isUserDraggingScroll && distanceFromBottom <= bottomSafeZoneThreshold
@@ -73,7 +80,12 @@ struct ConversationDetailView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 6)
             }
-            promptBar.padding(.top, 8)
+            if totalChangeCount > 0 {
+                changesSummaryBar(count: totalChangeCount)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+            }
+            promptBar.padding(.top, totalChangeCount > 0 ? 4 : 8)
         }
         .navigationTitle(model.conversation.title ?? "未命名对话")
         .navigationBarTitleDisplayMode(.inline)
@@ -139,8 +151,70 @@ struct ConversationDetailView: View {
                 }
             }
         }
+        .task {
+            if let diffs = try? await model.client.workspaceDiff(workspaceID: model.conversation.workspace_id) {
+                workspaceDiffCount = diffs.count
+            }
+        }
+        .onChange(of: model.session.isTurnRunning) { _, running in
+            if !running {
+                Task {
+                    if let diffs = try? await model.client.workspaceDiff(workspaceID: model.conversation.workspace_id) {
+                        workspaceDiffCount = diffs.count
+                    }
+                }
+            }
+        }
         .onChange(of: menu) { _, kind in
             if kind == .model || kind == .plusModel { Task { await model.refreshCatalog() } }
+        }
+    }
+
+    private func changesSummaryBar(count: Int) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                panel = .changes
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text("\(count) CHANGES")
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .tracking(0.3)
+                        .foregroundStyle(.primary.opacity(0.88))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color(.secondarySystemGroupedBackground))
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.75)
+                )
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                panel = .files
+            } label: {
+                Image(systemName: "folder")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color(.secondarySystemGroupedBackground))
+                    )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("浏览文件")
         }
     }
 
@@ -278,6 +352,20 @@ struct ConversationDetailView: View {
                 menu = nil
                 Task { await model.set(option, to: choice) }
             },
+            onAddCustomModel: { rawModel in
+                let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                var list = customRelayModels
+                if !list.contains(trimmed) {
+                    list.insert(trimmed, at: 0)
+                    if let data = try? JSONEncoder().encode(list),
+                       let str = String(data: data, encoding: .utf8) {
+                        customRelayModelsJSON = str
+                    }
+                }
+                menu = nil
+                Task { await model.setCustomModel(trimmed) }
+            },
             pickAccess: { id in
                 guard let mode = model.accessModes.first(where: { $0.id == id }) else { return }
                 menu = nil
@@ -298,8 +386,15 @@ struct ConversationDetailView: View {
         )
     }
 
+    private var customRelayModels: [String] {
+        guard let data = customRelayModelsJSON.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String].self, from: data)
+        else { return [] }
+        return decoded.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
     private var modelChoices: [PromptChoice] {
-        model.modelOptions.flatMap { option in
+        var choices: [PromptChoice] = model.modelOptions.flatMap { option in
             option.choices.map {
                 PromptChoice(
                     id: option.key + "|" + $0.id,
@@ -310,6 +405,27 @@ struct ConversationDetailView: View {
                 )
             }
         }
+        let optionKey = model.modelOptions.first?.key ?? "model"
+        let currentVal: String? = {
+            guard let opt = model.modelOptions.first, case .string(let s) = model.value(of: opt) else { return nil }
+            return s
+        }()
+        for custom in customRelayModels {
+            let choiceID = "\(optionKey)|\(custom)"
+            if !choices.contains(where: { $0.id == choiceID || $0.title == custom }) {
+                choices.insert(
+                    PromptChoice(
+                        id: choiceID,
+                        title: custom,
+                        tag: "自定义 / 中转",
+                        agentID: model.conversation.agent_id,
+                        selected: currentVal == custom
+                    ),
+                    at: 0
+                )
+            }
+        }
+        return choices
     }
 
     private var otherModelGroups: [PromptGroup] {
@@ -328,6 +444,13 @@ struct ConversationDetailView: View {
         for option in model.modelOptions {
             if let choice = option.choices.first(where: { option.key + "|" + $0.id == id }) {
                 return (option, choice)
+            }
+        }
+        if let option = model.modelOptions.first {
+            let prefix = option.key + "|"
+            if id.hasPrefix(prefix) {
+                let raw = String(id.dropFirst(prefix.count))
+                return (option, CatalogAgent.makeCustomChoice(raw))
             }
         }
         return nil
@@ -498,7 +621,7 @@ struct ConversationDetailView: View {
         } else if let message = model.loadError {
             LoadFailureView(message: message) { Task { await model.reload() } }
         } else {
-            ProgressView().frame(maxHeight: .infinity)
+            ConversationTimelineSkeletonView()
         }
     }
 
@@ -553,7 +676,7 @@ struct ConversationDetailView: View {
 
     @ViewBuilder
     private func scrollToBottomButton(proxy: ScrollViewProxy) -> some View {
-        let showExtendedLabel = unreadMessageUpdates > 0 || model.session.isTurnRunning || distanceFromBottom > 180
+        let showExtendedLabel = unreadMessageUpdates > 0 || model.session.isTurnRunning
         Button {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             userDetachedFromBottom = false
@@ -568,38 +691,35 @@ struct ConversationDetailView: View {
                 if model.session.isTurnRunning || unreadMessageUpdates > 0 {
                     Circle()
                         .fill(Color.orange)
-                        .frame(width: 7, height: 7)
+                        .frame(width: 6.5, height: 6.5)
                 }
 
                 if showExtendedLabel {
                     if unreadMessageUpdates > 0 {
                         Text("\(unreadMessageUpdates) 条新动态")
-                            .font(.system(size: 12.5, weight: .semibold))
+                            .font(.system(size: 12, weight: .semibold))
                             .monospacedDigit()
                     } else if model.session.isTurnRunning {
                         Text("跟随最新回答")
-                            .font(.system(size: 12.5, weight: .semibold))
-                    } else {
-                        Text("回到底部")
-                            .font(.system(size: 12.5, weight: .medium))
+                            .font(.system(size: 12, weight: .semibold))
                     }
                 }
 
-                Image(systemName: "arrow.down")
-                    .font(.system(size: 13, weight: .bold))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 13, weight: .semibold))
             }
             .foregroundStyle(.primary)
-            .padding(.horizontal, showExtendedLabel ? 14 : 11)
-            .frame(height: 36)
+            .padding(.horizontal, showExtendedLabel ? 13 : 0)
+            .frame(minWidth: 34, minHeight: 34)
             .background(
                 Capsule(style: .continuous)
                     .fill(Color(.secondarySystemGroupedBackground))
             )
             .overlay(
                 Capsule(style: .continuous)
-                    .strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1)
+                    .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.8)
             )
-            .shadow(color: .black.opacity(0.24), radius: 10, x: 0, y: 4)
+            .shadow(color: .black.opacity(0.22), radius: 8, x: 0, y: 3)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("滚动到最底部")
@@ -623,6 +743,8 @@ private struct MessageRow: View {
     let running: Bool
     let openDiff: (FileChangeItem) -> Void
 
+    @State private var processExpanded = false
+
     private var lastTextSegmentID: String? {
         item.segments.last { segment in
             if case .text = segment { return true }
@@ -630,12 +752,49 @@ private struct MessageRow: View {
         }?.id
     }
 
+    private var hasProcessSteps: Bool {
+        if !item.thinking.isEmpty || !item.tools.isEmpty || !item.changes.isEmpty {
+            return true
+        }
+        return item.segments.contains { seg in
+            switch seg {
+            case .thinking, .tools: return true
+            case .text: return false
+            }
+        }
+    }
+
+    private var textSegments: [(id: String, text: String)] {
+        if item.segments.isEmpty {
+            guard !item.text.isEmpty else { return [] }
+            return [(id: "\(item.id)-text", text: item.text)]
+        }
+        return item.segments.compactMap { seg in
+            if case let .text(id, text) = seg, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return (id: id, text: text)
+            }
+            return nil
+        }
+    }
+
+    private var workedForLabel: String {
+        let streaming = running && isLast
+        if streaming && textSegments.isEmpty && item.text.isEmpty {
+            return "Working…"
+        }
+        let ms = item.durationMs ?? 60_000
+        let totalMinutes = max(1, Int((Double(ms) / 60_000.0).rounded()))
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        return "Worked for \(hours)h \(minutes)m"
+    }
+
     var body: some View {
         switch item.role {
         case .user:
             let extracted = AttachmentImageStore.shared.extractUserAttachments(from: item.text)
             HStack {
-                Spacer(minLength: 48)
+                Spacer(minLength: 56)
                 VStack(alignment: .trailing, spacing: 6) {
                     if !extracted.items.isEmpty {
                         HStack(spacing: 6) {
@@ -650,105 +809,110 @@ private struct MessageRow: View {
                     }
                     if !extracted.cleanText.isEmpty {
                         Text(extracted.cleanText)
-                            .font(.system(size: 15))
+                            .font(.system(size: 14.5))
                             .lineSpacing(3)
+                            .foregroundStyle(.primary)
                             .textSelection(.enabled)
                             .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
+                            .padding(.vertical, 9)
                             .background(
-                                UnevenRoundedRectangle(
-                                    topLeadingRadius: 16,
-                                    bottomLeadingRadius: 16,
-                                    bottomTrailingRadius: 5,
-                                    topTrailingRadius: 16
-                                )
-                                .fill(Color.accentColor.opacity(0.16))
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(
+                                        Color(
+                                            UIColor { traits in
+                                                traits.userInterfaceStyle == .dark
+                                                    ? UIColor(white: 0.15, alpha: 1.0)
+                                                    : UIColor(white: 0.945, alpha: 1.0)
+                                            }
+                                        )
+                                    )
                             )
                     }
                 }
             }
         case .assistant:
             let streaming = running && isLast
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    AgentIconView(agent: agentID, size: 15)
-                        .frame(width: 22, height: 22)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(Color(.secondarySystemGroupedBackground))
-                        )
-                    Text(AgentBrand.displayName(agentID))
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(.primary)
-                    if let modelName, !modelName.isEmpty, modelName != AgentBrand.displayName(agentID) {
-                        Text(modelName)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+            let showExpandedProcess = processExpanded || (streaming && textSegments.isEmpty && item.text.isEmpty)
+            VStack(alignment: .leading, spacing: 10) {
+                if hasProcessSteps {
+                    Button {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                            processExpanded.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .rotationEffect(.degrees(showExpandedProcess ? 90 : 0))
+                            Text(workedForLabel)
+                                .font(.system(size: 13, weight: .medium))
+                                .monospacedDigit()
+                            if streaming {
+                                Circle()
+                                    .fill(Color.orange)
+                                    .frame(width: 5.5, height: 5.5)
+                            }
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 2)
+                        .contentShape(Rectangle())
                     }
-                    if streaming {
-                        Circle()
-                            .fill(Color.orange)
-                            .frame(width: 6, height: 6)
+                    .buttonStyle(.plain)
+
+                    if showExpandedProcess {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if item.segments.isEmpty {
+                                if !item.thinking.isEmpty {
+                                    ThinkingView(item: item, working: streaming && item.text.isEmpty)
+                                }
+                                if !item.tools.isEmpty || !item.changes.isEmpty {
+                                    ToolChipsView(item: item, working: streaming, openDiff: openDiff)
+                                }
+                            } else {
+                                ForEach(item.segments) { segment in
+                                    switch segment {
+                                    case let .thinking(_, text):
+                                        ThinkingView(
+                                            text: text,
+                                            durationMs: item.durationMs,
+                                            working: streaming && segment.id == item.segments.last?.id
+                                        )
+                                    case let .tools(_, tools):
+                                        ToolChipsView(
+                                            tools: tools,
+                                            changes: [],
+                                            working: streaming && segment.id == item.segments.last?.id,
+                                            openDiff: openDiff
+                                        )
+                                    case .text:
+                                        EmptyView()
+                                    }
+                                }
+                                if !item.changes.isEmpty {
+                                    ToolChipsView(
+                                        tools: [],
+                                        changes: item.changes,
+                                        working: false,
+                                        openDiff: openDiff
+                                    )
+                                }
+                            }
+                        }
+                        .padding(.leading, 4)
                     }
-                    Spacer()
                 }
 
-                if item.segments.isEmpty {
-                    if !item.thinking.isEmpty {
-                        ThinkingView(item: item, working: streaming && item.text.isEmpty)
-                    }
-                    if !item.tools.isEmpty || !item.changes.isEmpty {
-                        ToolChipsView(item: item, working: streaming, openDiff: openDiff)
-                    }
-                    if !item.text.isEmpty {
-                        StreamingMessageText(text: item.text, streaming: streaming)
-                            .padding(.top, 2)
-                    }
-                } else {
-                    ForEach(item.segments) { segment in
-                        segmentView(segment, streaming: streaming)
-                    }
-                    if !item.changes.isEmpty {
-                        ToolChipsView(
-                            tools: [],
-                            changes: item.changes,
-                            working: false,
-                            openDiff: openDiff
-                        )
-                    }
+                ForEach(Array(textSegments.enumerated()), id: \.element.id) { idx, seg in
+                    let isLastText = idx == textSegments.count - 1
+                    StreamingMessageText(
+                        text: seg.text,
+                        streaming: streaming && isLastText,
+                        showCopyButton: isLastText,
+                        copyPayload: item.text
+                    )
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    @ViewBuilder
-    private func segmentView(_ segment: TimelineSegment, streaming: Bool) -> some View {
-        let isLastSegment = segment.id == item.segments.last?.id
-        switch segment {
-        case let .thinking(_, text):
-            ThinkingView(
-                text: text,
-                durationMs: item.durationMs,
-                working: streaming && isLastSegment
-            )
-        case let .tools(_, tools):
-            ToolChipsView(
-                tools: tools,
-                changes: [],
-                working: streaming && isLastSegment,
-                openDiff: openDiff
-            )
-        case let .text(id, text):
-            let isLastText = id == lastTextSegmentID
-            StreamingMessageText(
-                text: text,
-                streaming: streaming && isLastSegment,
-                showCopyButton: isLastText,
-                copyPayload: item.text
-            )
-            .padding(.top, 2)
         }
     }
 }

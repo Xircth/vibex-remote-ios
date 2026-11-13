@@ -41,9 +41,12 @@ enum AppTab: Hashable, CaseIterable, Identifiable {
 struct RootTabView: View {
     @Environment(ServerStore.self) private var servers
     @Environment(AppAppearanceStore.self) private var appearance
+    @Namespace private var tabNamespace
     @State private var selection: AppTab = .conversations
     @State private var attentionCenter = CompanionAttentionCenter()
     @State private var isConversationsChromeHidden = false
+    @State private var isBoardChromeHidden = false
+    @State private var isSpaceChromeHidden = false
     @State private var isLaunchRevealed = false
     @State private var isKeyboardVisible = false
 
@@ -54,8 +57,16 @@ struct RootTabView: View {
 
     private var shouldShowBottomBar: Bool {
         if isKeyboardVisible { return false }
-        if selection == .conversations && isConversationsChromeHidden { return false }
-        return true
+        switch selection {
+        case .conversations:
+            return !isConversationsChromeHidden
+        case .board:
+            return !isBoardChromeHidden
+        case .space:
+            return !isSpaceChromeHidden
+        case .settings:
+            return true
+        }
     }
 
     private var isBottomBarRevealed: Bool {
@@ -63,7 +74,7 @@ struct RootTabView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        ZStack(alignment: .bottom) {
             ZStack {
                 RequiresServer(selection: $selection) { client in
                     ConversationsView(
@@ -89,17 +100,40 @@ struct RootTabView: View {
                 .allowsHitTesting(selection == .conversations)
 
                 if selection == .board {
-                    RequiresServer(selection: $selection) { BoardView(client: $0) }
-                        .transition(.opacity)
+                    RequiresServer(selection: $selection) {
+                        BoardView(
+                            client: $0,
+                            onChromeHiddenChange: { hidden in
+                                withAnimation(.smooth(duration: 0.2)) {
+                                    isBoardChromeHidden = hidden
+                                }
+                            }
+                        )
+                    }
+                    .transition(.opacity)
                 } else if selection == .space {
-                    RequiresServer(selection: $selection) { CollaborationSpaceView(client: $0) }
-                        .transition(.opacity)
+                    RequiresServer(selection: $selection) {
+                        CollaborationSpaceView(
+                            client: $0,
+                            onChromeHiddenChange: { hidden in
+                                withAnimation(.smooth(duration: 0.2)) {
+                                    isSpaceChromeHidden = hidden
+                                }
+                            }
+                        )
+                    }
+                    .transition(.opacity)
                 } else if selection == .settings {
                     SettingsView()
                         .transition(.opacity)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if shouldShowBottomBar {
+                    Color.clear.frame(height: 66)
+                }
+            }
 
             if shouldShowBottomBar {
                 bottomNavigationBar
@@ -160,46 +194,65 @@ struct RootTabView: View {
     }
 
     private var bottomNavigationBar: some View {
-        VStack(spacing: 0) {
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(height: 0.5)
-
-            HStack(spacing: 0) {
-                ForEach(AppTab.allCases) { tab in
-                    let isSelected = selection == tab
-                    Button {
-                        if selection != tab {
-                            withAnimation(.smooth(duration: 0.16)) {
-                                selection = tab
-                            }
+        HStack(spacing: 4) {
+            ForEach(AppTab.allCases) { tab in
+                let isSelected = selection == tab
+                Button {
+                    if selection != tab {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                            selection = tab
                         }
-                    } label: {
-                        VStack(spacing: 3.5) {
-                            Image(systemName: isSelected ? tab.selectedIcon : tab.icon)
-                                .font(.system(size: 17.5, weight: isSelected ? .semibold : .regular))
-                                .frame(height: 22)
-
-                            Text(tab.title)
-                                .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 7)
-                        .padding(.bottom, 4)
-                        .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(tab.title)
+                } label: {
+                    VStack(spacing: 2.5) {
+                        Image(systemName: isSelected ? tab.selectedIcon : tab.icon)
+                            .font(.system(size: 16.5, weight: isSelected ? .semibold : .regular))
+                            .frame(height: 19)
+
+                        Text(tab.title)
+                            .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background {
+                        if isSelected {
+                            Capsule(style: .continuous)
+                                .fill(Color.accentColor.opacity(0.11))
+                                .matchedGeometryEffect(id: "activeTabPill", in: tabNamespace)
+                        }
+                    }
+                    .contentShape(Capsule(style: .continuous))
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel(tab.title)
             }
-            .padding(.horizontal, 8)
         }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 4)
         .background(
-            Color(.secondarySystemGroupedBackground)
-                .ignoresSafeArea(edges: .bottom)
+            .ultraThinMaterial,
+            in: Capsule(style: .continuous)
         )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.24),
+                            Color.primary.opacity(0.08),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 0.6
+                )
+        )
+        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+        .padding(.horizontal, 22)
+        .padding(.bottom, 6)
     }
 }
 
