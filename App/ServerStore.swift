@@ -470,19 +470,33 @@ final class ServerStore {
         pendingCloudFallback = nil
     }
 
+    /// The desktop revokes a phone when another phone connects, it signs out, or the user removes it.
+    private static let revokedFailureReason = "连接授权已失效"
+    private static let revokedNotice = "电脑已收回本机的连接授权，请重新连接"
+
+    /// The account relay URL of a desktop signed in to the same account. It lets the phone reach
+    /// that desktop off-LAN even when the profile never learned a published origin.
+    @MainActor
+    private func accountTenantOrigin(for hostId: String) -> String? {
+        guard let accountStore, accountStore.isSignedIn, accountStore.canUseCloudRelay else { return nil }
+        let rawHostId = AccountDesktop.rawHostId(hostId)
+        guard let desktop = accountStore.desktops.first(where: { $0.hostId == rawHostId }) else { return nil }
+        return desktop.cloudOrigin(relayBase: accountStore.relayBase)
+    }
+
     @MainActor
     func handleActiveCredentialRevoked(_ profile: ServerProfile) {
         guard !isPresentingPairSheet else {
             isOnline = false
             realtimeRttMs = nil
-            connectionFailureReason = "已被其他手机接管下线"
+            connectionFailureReason = Self.revokedFailureReason
             return
         }
         forget(profile)
         isOnline = false
         realtimeRttMs = nil
-        connectionFailureReason = "已被其他手机接管下线"
-        pairingError = "当前电脑已切换至其他手机远程连接，本机已强制下线并清除凭据，下次需重新连接"
+        connectionFailureReason = Self.revokedFailureReason
+        pairingError = Self.revokedNotice
     }
 
     @MainActor
@@ -536,10 +550,13 @@ final class ServerStore {
 
         // If the computer switched to or from Cloud Service and we know its hostId, try rendezvous origins
         if let hostId = active.hostId, !hostId.isEmpty {
-            let candidates = await PairingClient.resolveHostRendezvous(
+            var candidates = await PairingClient.resolveHostRendezvous(
                 hostId: hostId,
                 knownOrigins: profiles.map(\.origin)
             )
+            if let accountOrigin = accountTenantOrigin(for: hostId), !candidates.contains(accountOrigin) {
+                candidates.append(accountOrigin)
+            }
             for candidate in candidates where candidate != active.origin {
                 if let probe = await PairingClient.probeHostHealth(
                     originUrl: candidate,
