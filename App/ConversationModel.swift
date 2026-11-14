@@ -2,13 +2,29 @@ import CompanionCore
 import Foundation
 import Observation
 
+struct PendingInitialPrompt: Equatable {
+    let text: String
+    let workspaceID: String
+    let agentID: String
+    let modeID: String?
+    let modelKey: String?
+    let modelValue: String?
+    let effortKey: String?
+    let effortValue: JSONValue?
+}
+
 @MainActor
 @Observable
 final class ConversationModel {
     let client: HostClient
     let conversation: ConversationListItem
 
-    private(set) var items: [TimelineItem] = []
+    private var transcriptItems: [TimelineItem] = []
+    private var optimisticUserItem: TimelineItem?
+    private var optimisticBaselineCount = 0
+    private var optimisticThinkingUntil: Date = .distantPast
+    private var pendingInitialPrompt: PendingInitialPrompt?
+    private var initialPromptDispatched = false
     private var transcript: TranscriptState
     private let activity = TaskActivityController.shared
     private var events: [RemoteEvent] = []
@@ -26,14 +42,42 @@ final class ConversationModel {
     private(set) var boostPollingUntil: Date = .distantPast
     var actionError: String?
 
-    var isActivelyStreaming: Bool {
-        session.isTurnRunning || Date() < boostPollingUntil
+    var items: [TimelineItem] {
+        guard let opt = optimisticUserItem else { return transcriptItems }
+        let caughtUp = transcriptItems.count > optimisticBaselineCount
+            || transcriptItems.suffix(2).contains(where: { $0.role == .user && $0.text == opt.text })
+        return caughtUp ? transcriptItems : (transcriptItems + [opt])
     }
 
-    init(client: HostClient, conversation: ConversationListItem) {
+    var isThinkingOrRunning: Bool {
+        session.isTurnRunning || Date() < optimisticThinkingUntil
+    }
+
+    var isActivelyStreaming: Bool {
+        isThinkingOrRunning || Date() < boostPollingUntil
+    }
+
+    init(
+        client: HostClient,
+        conversation: ConversationListItem,
+        initialPrompt: PendingInitialPrompt? = nil
+    ) {
         self.client = client
         self.conversation = conversation
         self.transcript = TranscriptState(conversationID: conversation.id)
+        if let initialPrompt {
+            self.pendingInitialPrompt = initialPrompt
+            self.hasLoaded = true
+            self.optimisticBaselineCount = 0
+            self.optimisticUserItem = TimelineItem(
+                id: "optimistic-\(UUID().uuidString)",
+                role: .user,
+                text: initialPrompt.text
+            )
+            self.optimisticThinkingUntil = Date().addingTimeInterval(25)
+            self.boostPollingUntil = Date().addingTimeInterval(30)
+            self.session.isTurnRunning = true
+        }
     }
 
     func reload() async {
@@ -63,13 +107,22 @@ final class ConversationModel {
         switch transcriptResult {
         case .success(let state):
             transcript = state
-            items = state.items
+            transcriptItems = state.items
+            if let opt = optimisticUserItem {
+                let caughtUp = state.items.count > optimisticBaselineCount
+                    || state.items.suffix(2).contains(where: { $0.role == .user && $0.text == opt.text })
+                if caughtUp {
+                    optimisticUserItem = nil
+                }
+            }
             hasLoaded = true
             loadError = nil
         case .failure(let error) where error is CancellationError:
             return
         case .failure(let error):
-            loadError = describeHostFailure(error)
+            if optimisticUserItem == nil {
+                loadError = describeHostFailure(error)
+            }
             return
         }
 
@@ -78,11 +131,20 @@ final class ConversationModel {
             let fresh = cache.events ?? []
             events += fresh
             lastSequence = max(lastSequence, cache.confirmed_through)
-            session = SessionStateBuilder.build(from: events)
+            let built = SessionStateBuilder.build(from: events)
+            if built.isTurnRunning {
+                optimisticThinkingUntil = .distantPast
+            } else if optimisticUserItem == nil, transcriptItems.last?.role == .assistant {
+                optimisticThinkingUntil = .distantPast
+            }
+            session = built
         }
-        await applyLiveControls()
-        if agents.isEmpty { await refreshCatalog() }
-        let lastAssistant = items.last { $0.role == .assistant }
+        applyLiveControls()
+        if agents.isEmpty {
+            Task { await refreshCatalog() }
+        }
+        let currentItems = items
+        let lastAssistant = currentItems.last { $0.role == .assistant }
         let latestToolName = lastAssistant?.tools.last?.name
         let totalSteps = (lastAssistant?.tools.count ?? 0) + (lastAssistant?.thinking.isEmpty == false ? 1 : 0)
         let hasPendingApproval = !session.pendingPermissions.isEmpty || !session.pendingQuestions.isEmpty
@@ -97,29 +159,29 @@ final class ConversationModel {
             conversationID: conversation.id,
             projectName: "VibeX",
             title: conversation.title ?? "未命名对话",
-            tasks: items.currentPlan,
+            tasks: currentItems.currentPlan,
             latestToolName: latestToolName,
             stepCount: totalSteps,
             hasThinking: !(lastAssistant?.thinking.isEmpty ?? true),
             hasTextOutput: !(lastAssistant?.text.isEmpty ?? true),
             hasPendingApproval: hasPendingApproval,
             approvalSummary: approvalSummary,
-            running: session.isTurnRunning
+            running: isThinkingOrRunning
         )
     }
 
     func stopActivity() {
         // Keep Live Activity alive in the Dynamic Island & Lock Screen if the turn is still running
-        if !session.isTurnRunning && session.pendingPermissions.isEmpty && session.pendingQuestions.isEmpty {
+        if !isThinkingOrRunning && session.pendingPermissions.isEmpty && session.pendingQuestions.isEmpty {
             activity.stop()
         }
     }
 
-    /// Brings the Agent session up (once per visit) so its modes and options exist even before the first message.
-    private func applyLiveControls() async {
+    /// Brings the Agent session up (once per visit, non-blocking) so its modes and options exist even before the first message.
+    private func applyLiveControls() {
         if !controlsRequested {
             controlsRequested = true
-            await ensureLiveControls()
+            Task { await ensureLiveControls() }
         }
         guard let live = liveControls else { return }
         if session.modes.isEmpty {
@@ -203,9 +265,52 @@ final class ConversationModel {
         return option.currentLabel ?? conversation.model
     }
 
-    /// Other usable Agents with models: shown for reference, a conversation keeps its Agent.
-    var otherAgentsWithModels: [CatalogAgent] {
-        agents.filter { $0.usable && $0.id != conversation.agent_id && !$0.modelOptions.isEmpty }
+    func dispatchInitialPromptIfNeeded() async -> String? {
+        guard let prompt = pendingInitialPrompt, !initialPromptDispatched else { return nil }
+        initialPromptDispatched = true
+        controlsRequested = true
+
+        let hasCustomModel = (prompt.modelValue?.isEmpty == false) && prompt.modelValue != "default"
+        let hasCustomMode = prompt.modeID?.isEmpty == false
+        let hasCustomEffort = prompt.effortKey?.isEmpty == false && prompt.effortValue != nil
+
+        do {
+            if hasCustomMode || hasCustomModel || hasCustomEffort {
+                liveControls = try? await client.ensureSessionControls(conversationID: conversation.id)
+                if let modeID = prompt.modeID, !modeID.isEmpty {
+                    try? await client.setSessionMode(conversationID: conversation.id, modeID: modeID)
+                }
+                if hasCustomModel, let modelKey = prompt.modelKey, let modelValue = prompt.modelValue {
+                    try? await client.setSessionConfigOption(
+                        conversationID: conversation.id,
+                        key: modelKey,
+                        value: .string(modelValue)
+                    )
+                }
+                if let effortKey = prompt.effortKey, let effortValue = prompt.effortValue {
+                    try? await client.setSessionConfigOption(
+                        conversationID: conversation.id,
+                        key: effortKey,
+                        value: effortValue
+                    )
+                }
+            }
+            try await client.sendMessage(
+                conversationID: conversation.id,
+                workspaceID: prompt.workspaceID,
+                agentID: prompt.agentID,
+                text: prompt.text
+            )
+            actionError = nil
+            Task { await reload() }
+            return nil
+        } catch {
+            optimisticUserItem = nil
+            optimisticThinkingUntil = .distantPast
+            session.isTurnRunning = false
+            actionError = describeHostFailure(error)
+            return prompt.text
+        }
     }
 
     func send(_ text: String) async -> Bool {
@@ -215,15 +320,33 @@ final class ConversationModel {
             actionError = "此对话没有绑定 Agent，无法发送"
             return false
         }
+        actionError = nil
+        hasLoaded = true
+        optimisticBaselineCount = transcriptItems.count
+        optimisticUserItem = TimelineItem(
+            id: "optimistic-\(UUID().uuidString)",
+            role: .user,
+            text: trimmed
+        )
+        optimisticThinkingUntil = Date().addingTimeInterval(20)
         boostPollingUntil = Date().addingTimeInterval(25)
         session.isTurnRunning = true
-        return await perform {
+
+        do {
             try await client.sendMessage(
                 conversationID: conversation.id,
                 workspaceID: conversation.workspace_id,
                 agentID: agentID,
                 text: trimmed
             )
+            Task { await reload() }
+            return true
+        } catch {
+            optimisticUserItem = nil
+            optimisticThinkingUntil = .distantPast
+            session.isTurnRunning = false
+            actionError = describeHostFailure(error)
+            return false
         }
     }
 
@@ -250,6 +373,8 @@ final class ConversationModel {
     }
 
     func cancelTurn() async {
+        optimisticThinkingUntil = .distantPast
+        session.isTurnRunning = false
         _ = await perform { try await client.cancelTurn(conversationID: conversation.id) }
     }
 

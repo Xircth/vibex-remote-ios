@@ -11,14 +11,7 @@ struct RequiresServer<Content: View>: View {
         if let profile = servers.activeProfile, servers.isSessionConnected, let client = servers.client(for: profile) {
             content(client)
         } else {
-            AppNavigationDrawer(selection: $selection) {
-                ConnectComputerEmptyState()
-                    .overlay(alignment: .topLeading) {
-                        SidebarButton()
-                            .padding(.horizontal, 14)
-                            .padding(.top, 6)
-                    }
-            }
+            ConnectComputerEmptyState()
         }
     }
 }
@@ -35,7 +28,9 @@ struct ConnectComputerEmptyState: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            if isSyncingAccount {
+            if connectFlow.isAutoConnectingInBackground {
+                LoadingState(label: "正在连接「\(connectFlow.autoConnectingHostName ?? "你的电脑")」")
+            } else if isSyncingAccount {
                 LoadingState(label: "正在同步你的电脑")
             } else {
                 Image(systemName: "desktopcomputer")
@@ -66,6 +61,7 @@ struct ConnectComputerEmptyState: View {
             }
         }
         .padding(.horizontal, 24)
+        .padding(.bottom, WorkspaceNavigationStore.bottomDockClearance)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemGroupedBackground))
     }
@@ -73,7 +69,11 @@ struct ConnectComputerEmptyState: View {
     private func connect() {
         servers.pairingError = nil
         if account.isSignedIn {
-            connectFlow.presentPicker(servers: servers)
+            if account.desktops.count == 1, let only = account.desktops.first {
+                connectFlow.connect(.accountDesktop(only), servers: servers, account: account, silentUntilNeeded: true)
+            } else {
+                connectFlow.presentPicker(servers: servers)
+            }
         } else if let profile = servers.activeProfile, servers.client(for: profile) != nil {
             servers.connectSavedProfile(profile)
         } else {

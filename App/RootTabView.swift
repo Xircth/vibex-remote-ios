@@ -11,17 +11,17 @@ enum AppTab: Hashable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .conversations: return "对话"
+        case .conversations: return "会话"
         case .board: return "看板"
-        case .space: return "协作空间"
+        case .space: return "协作"
         case .settings: return "设置"
         }
     }
 
     var icon: String {
         switch self {
-        case .conversations: return "message"
-        case .board: return "square.grid.2x2"
+        case .conversations: return "bubble.left"
+        case .board: return "chart.bar"
         case .space: return "person.2"
         case .settings: return "gearshape"
         }
@@ -29,8 +29,8 @@ enum AppTab: Hashable, CaseIterable, Identifiable {
 
     var selectedIcon: String {
         switch self {
-        case .conversations: return "message.fill"
-        case .board: return "square.grid.2x2.fill"
+        case .conversations: return "bubble.left.fill"
+        case .board: return "chart.bar.fill"
         case .space: return "person.2.fill"
         case .settings: return "gearshape.fill"
         }
@@ -40,7 +40,7 @@ enum AppTab: Hashable, CaseIterable, Identifiable {
 struct RootTabView: View {
     @Environment(ServerStore.self) private var servers
     @Environment(AppAppearanceStore.self) private var appearance
-    @State private var selection: AppTab = .conversations
+    @State private var navStore = WorkspaceNavigationStore()
     @State private var attentionCenter = CompanionAttentionCenter()
 
     private var activeClient: HostClient? {
@@ -48,48 +48,74 @@ struct RootTabView: View {
         return servers.client(for: profile)
     }
 
-    var body: some View {
-        ZStack {
-            RequiresServer(selection: $selection) { client in
-                ConversationsView(client: client, selection: $selection)
-            }
-            .opacity(selection == .conversations ? 1 : 0)
-            .allowsHitTesting(selection == .conversations)
+    /// Ensures the floating dock is also hidden when disconnected on a server-backed tab?
+    /// Wait: on Level 1 (`isCurrentTabAtRoot`), even when disconnected, keeping the floating dock
+    /// visible lets the user switch between `会话 / 看板 / 协作 / 设置` freely!
+    /// And when disconnected, `conversationsDepth / boardDepth / spaceDepth` reset to 0.
+    private var shouldShowFloatingDock: Bool {
+        if activeClient == nil || !servers.isSessionConnected {
+            return navStore.selection != .settings || navStore.settingsDepth == 0
+        }
+        return navStore.isCurrentTabAtRoot
+    }
 
-            if selection == .board {
-                RequiresServer(selection: $selection) { client in
-                    AppNavigationDrawer(selection: $selection) {
-                        BoardView(client: client)
-                    }
+    var body: some View {
+        @Bindable var bindableNav = navStore
+        ZStack {
+            RequiresServer(selection: $bindableNav.selection) { client in
+                ConversationsView(client: client, selection: $bindableNav.selection)
+            }
+            .opacity(navStore.selection == .conversations ? 1 : 0)
+            .allowsHitTesting(navStore.selection == .conversations)
+
+            if navStore.selection == .board {
+                RequiresServer(selection: $bindableNav.selection) { client in
+                    BoardView(client: client)
                 }
                 .transition(.opacity)
-            } else if selection == .space {
-                RequiresServer(selection: $selection) { client in
-                    AppNavigationDrawer(selection: $selection) {
-                        CollaborationSpaceView(client: client)
-                    }
+            } else if navStore.selection == .space {
+                RequiresServer(selection: $bindableNav.selection) { client in
+                    CollaborationSpaceView(client: client)
                 }
                 .transition(.opacity)
-            } else if selection == .settings {
-                AppNavigationDrawer(selection: $selection) {
-                    SettingsView()
-                }
-                .transition(.opacity)
+            } else if navStore.selection == .settings {
+                SettingsView()
+                    .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .environment(navStore)
         .environment(attentionCenter)
-        .overlay(alignment: .top) {
-            if let client = activeClient {
-                CompanionToastOverlay(
-                    client: client,
-                    center: attentionCenter,
-                    onOpenConversation: { conversation in
-                        selection = .conversations
-                        attentionCenter.openConversation(conversation)
-                    }
-                )
+        .overlay(alignment: .bottom) {
+            if shouldShowFloatingDock {
+                FloatingWorkspaceCapsuleDock(navStore: navStore)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+        }
+        .animation(.spring(response: 0.30, dampingFraction: 0.86), value: shouldShowFloatingDock)
+        .overlay(alignment: .top) {
+            VStack(spacing: 8) {
+                if let sasNotice = servers.connectedSasNotice {
+                    ConnectedSasCapsuleView(notice: sasNotice) {
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            servers.dismissConnectedSasNotice()
+                        }
+                    }
+                    .padding(.top, 6)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                if let client = activeClient {
+                    CompanionToastOverlay(
+                        client: client,
+                        center: attentionCenter,
+                        onOpenConversation: { conversation in
+                            navStore.selection = .conversations
+                            attentionCenter.openConversation(conversation)
+                        }
+                    )
+                }
+            }
+            .animation(.spring(response: 0.30, dampingFraction: 0.86), value: servers.connectedSasNotice)
         }
         .task(id: servers.activeProfile?.id) {
             guard let client = activeClient else { return }
@@ -104,7 +130,7 @@ struct RootTabView: View {
         .onAppear {
             appearance.applyInterfaceStyleToAllWindows(appearance.themeMode.uiInterfaceStyle)
         }
-        .onChange(of: selection) { _, newTab in
+        .onChange(of: navStore.selection) { _, newTab in
             dismissKeyboard()
             if newTab == .conversations {
                 NotificationCenter.default.post(name: Notification.Name("vibex.didReturnToConversationsTab"), object: nil)
@@ -115,6 +141,51 @@ struct RootTabView: View {
                 .frame(width: 0, height: 0)
                 .allowsHitTesting(false)
         )
+    }
+}
+
+private struct ConnectedSasCapsuleView: View {
+    let notice: ConnectedSasNotice
+    let onDismiss: () -> Void
+
+    var body: some View {
+        Button(action: onDismiss) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.green)
+
+                Text("已连接 \(notice.hostName)")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Text("连接码 \(notice.sasCode)")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.accentColor.opacity(0.12))
+                    )
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.10), radius: 10, y: 4)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.6)
+            )
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .accessibilityLabel("已连接 \(notice.hostName)，连接码 \(notice.sasCode)")
     }
 }
 

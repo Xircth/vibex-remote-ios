@@ -1,19 +1,28 @@
 import CompanionCore
 import SwiftUI
 
+private enum SettingsRoute: Hashable {
+    case account
+    case pairedComputers
+    case skillsHub
+    case font
+    case notifications
+    case about
+}
+
 struct SettingsView: View {
     @Environment(ServerStore.self) private var servers
     @Environment(AppAppearanceStore.self) private var appearance
     @Environment(VibeXAccountStore.self) private var account
+    @Environment(WorkspaceNavigationStore.self) private var navStore
+    @State private var path: [SettingsRoute] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 // 1. VibeX 账号（唯一顶栏个人中心）
                 Section {
-                    NavigationLink {
-                        VibeXAccountSettingsView()
-                    } label: {
+                    NavigationLink(value: SettingsRoute.account) {
                         HStack(spacing: 12) {
                             MemberBotAvatarView(
                                 config: appearance.avatarConfig,
@@ -63,9 +72,7 @@ struct SettingsView: View {
 
                 // 2. 工作站与扩展
                 Section {
-                    NavigationLink {
-                        PairedComputersSettingsView()
-                    } label: {
+                    NavigationLink(value: SettingsRoute.pairedComputers) {
                         HStack(spacing: 10) {
                             settingsIconBadge(
                                 systemImage: "desktopcomputer",
@@ -105,9 +112,7 @@ struct SettingsView: View {
                     }
                     .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
 
-                    NavigationLink {
-                        SkillsHubSettingsView()
-                    } label: {
+                    NavigationLink(value: SettingsRoute.skillsHub) {
                         HStack(spacing: 10) {
                             settingsIconBadge(
                                 systemImage: "sparkles.rectangle.stack.fill",
@@ -148,9 +153,7 @@ struct SettingsView: View {
                     }
                     .listRowInsets(EdgeInsets(top: 7, leading: 14, bottom: 7, trailing: 14))
 
-                    NavigationLink {
-                        FontSettingsDetailView()
-                    } label: {
+                    NavigationLink(value: SettingsRoute.font) {
                         HStack(spacing: 10) {
                             settingsIconBadge(
                                 systemImage: "textformat.size",
@@ -166,9 +169,7 @@ struct SettingsView: View {
                     }
                     .listRowInsets(EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14))
 
-                    NavigationLink {
-                        NotificationSettingsDetailView()
-                    } label: {
+                    NavigationLink(value: SettingsRoute.notifications) {
                         HStack(spacing: 10) {
                             settingsIconBadge(
                                 systemImage: "bell.badge.fill",
@@ -187,9 +188,7 @@ struct SettingsView: View {
 
                 // 4. 关于 VibeX
                 Section {
-                    NavigationLink {
-                        AboutVibeXDetailView()
-                    } label: {
+                    NavigationLink(value: SettingsRoute.about) {
                         HStack(spacing: 10) {
                             settingsIconBadge(
                                 systemImage: "info.circle.fill",
@@ -208,13 +207,31 @@ struct SettingsView: View {
             }
             .listSectionSpacing(10)
             .contentMargins(.top, 4, for: .scrollContent)
+            .safeAreaPadding(.bottom, WorkspaceNavigationStore.bottomDockClearance)
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    SidebarButton()
+            .navigationDestination(for: SettingsRoute.self) { route in
+                switch route {
+                case .account:
+                    VibeXAccountSettingsView()
+                case .pairedComputers:
+                    PairedComputersSettingsView()
+                case .skillsHub:
+                    SkillsHubSettingsView()
+                case .font:
+                    FontSettingsDetailView()
+                case .notifications:
+                    NotificationSettingsDetailView()
+                case .about:
+                    AboutVibeXDetailView()
                 }
             }
+        }
+        .onAppear {
+            navStore.settingsDepth = path.count
+        }
+        .onChange(of: path.count) { _, count in
+            navStore.settingsDepth = count
         }
     }
 

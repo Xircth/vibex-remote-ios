@@ -237,6 +237,25 @@ private struct OfflineTransport: HttpTransport {
     #expect(host.displayName == "ltfdeMacBook-Pro")
 }
 
+@Test func requestConnectReturnsImmediateCredentialWhenSameAccountAutoApproved() async throws {
+    let autoApprovedJSON = """
+    {"request_id":"req-auto","host_id":"host-abc","host_name":"MacStudio.local","sas_code":"1204","status":"approved","credential":\(credentialJSON)}
+    """
+    let transport = ScriptedTransport([autoApprovedJSON], statuses: [201])
+    let client = PairingClient(transport: transport)
+    let origin = try HostOrigin.parse("http://192.168.1.10:17891")
+
+    let result = try await client.requestConnect(
+        origin: origin,
+        deviceName: "iPhone 16 Pro",
+        accountToken: "vbx_user_token"
+    )
+    #expect(result.status == "approved")
+    #expect(result.sasCode == "1204")
+    #expect(result.credential?.access_token == "device-token")
+    #expect(transport.requests.count == 1)
+}
+
 @Test func e2eeHandshakeAndEncryptionRoundTrip() throws {
     let clientA = E2eeSessionManager()
     let clientB = E2eeSessionManager()

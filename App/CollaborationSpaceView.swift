@@ -9,6 +9,7 @@ enum CollabNavRoute: Hashable {
 struct CollaborationSpaceView: View {
     let client: HostClient
 
+    @Environment(WorkspaceNavigationStore.self) private var navStore
     @State private var projects: [ProjectSummary] = []
     @State private var selectedProjectID: String = ""
     @State private var sidebarItems: [CollabSidebarItem] = []
@@ -52,36 +53,17 @@ struct CollaborationSpaceView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            VStack(spacing: 0) {
-                HStack {
-                    Spacer()
-                    Picker("切换视图", selection: $filterKind) {
-                        ForEach(FilterKind.allCases) { kind in
-                            Text(kind.rawValue).tag(kind)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 196)
-                    Spacer()
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(Color(.systemGroupedBackground))
-
-                content
-            }
+            content
             .navigationTitle("协作空间")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    SidebarButton()
-                }
                 ToolbarItem(placement: .topBarLeading) {
                     if !orderedProjects.isEmpty {
                         Menu {
                             ForEach(orderedProjects) { project in
                                 Button {
                                     selectedProjectID = project.id
+                                    navStore.selectedProjectID = project.id
                                     Task { await reload() }
                                 } label: {
                                     HStack {
@@ -93,19 +75,17 @@ struct CollaborationSpaceView: View {
                                 }
                             }
                         } label: {
-                            HStack(spacing: 4) {
+                            HStack(spacing: 5) {
                                 Image(systemName: activeProject?.isGit == true ? "arrow.triangle.branch" : "folder.fill")
-                                    .font(.caption)
+                                    .font(.caption.weight(.semibold))
                                 Text(activeProject?.name ?? "选择项目")
                                     .font(.subheadline.weight(.semibold))
                                     .lineLimit(1)
                                 Image(systemName: "chevron.down")
-                                    .font(.caption2)
+                                    .font(.caption2.weight(.semibold))
                                     .foregroundStyle(.secondary)
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(Color(.secondarySystemGroupedBackground), in: Capsule())
+                            .foregroundStyle(.primary)
                         }
                     }
                 }
@@ -210,6 +190,15 @@ struct CollaborationSpaceView: View {
                 renamingGroup = nil
             }
         }
+        .onAppear {
+            if let globalProjectID = navStore.selectedProjectID, !globalProjectID.isEmpty {
+                selectedProjectID = globalProjectID
+            }
+            navStore.spaceDepth = path.count
+        }
+        .onChange(of: path.count) { _, count in
+            navStore.spaceDepth = count
+        }
         .task {
             while !Task.isCancelled {
                 await reload()
@@ -220,18 +209,35 @@ struct CollaborationSpaceView: View {
 
     // MARK: - Filtering & Grouping
 
+    private var trimmedSearchQuery: String {
+        searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isSearching: Bool {
+        !trimmedSearchQuery.isEmpty
+    }
+
     private var filteredItems: [CollabSidebarItem] {
-        switch filterKind {
-        case .all:
-            return sidebarItems
-        case .primary:
+        let basePool: [CollabSidebarItem]
+        if isSearching || filterKind == .all {
+            basePool = sidebarItems
+        } else {
             let primaryPool = sidebarItems.filter { item in
                 item.isGroup
                     || item.member?.isSupervisor == true
                     || item.unreadCount > 0
                     || item.lastMessage != nil
             }
-            return primaryPool.isEmpty ? sidebarItems : primaryPool
+            basePool = primaryPool.isEmpty ? sidebarItems : primaryPool
+        }
+
+        guard isSearching else { return basePool }
+        let q = trimmedSearchQuery.lowercased()
+        return basePool.filter { item in
+            let matchesName = item.displayName.lowercased().contains(q)
+            let matchesPreview = item.lastMessage?.preview?.lowercased().contains(q) ?? false
+            let matchesAgent = AgentBrand.displayName(item.member?.agent).lowercased().contains(q)
+            return matchesName || matchesPreview || matchesAgent
         }
     }
 
@@ -248,23 +254,29 @@ struct CollaborationSpaceView: View {
         return filteredItems.filter { $0.id != sup.id }
     }
 
-    private var searchResults: [SearchResultItem] {
-        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return [] }
-        return sidebarItems.compactMap { item in
-            let matchesName = item.displayName.lowercased().contains(q)
-            let matchesPreview = item.lastMessage?.preview?.lowercased().contains(q) ?? false
-            guard matchesName || matchesPreview else { return nil }
-            return SearchResultItem(
-                id: item.id,
-                title: item.displayName,
-                subtitle: item.lastMessage?.preview ?? (item.isGroup ? "群组" : "私聊"),
-                icon: item.isGroup ? "person.3.fill" : "person.crop.circle.fill",
-                action: {
-                    cachedSidebarByThreadID[item.threadId] = item
-                    path.append(.chat(threadID: item.threadId))
-                }
+    private var searchAndFilterHeader: some View {
+        VStack(spacing: 10) {
+            UnifiedSearchBar(
+                query: $searchQuery,
+                placeholder: "搜索群组或助手…"
             )
+
+            HStack {
+                Picker("切换视图", selection: $filterKind) {
+                    ForEach(FilterKind.allCases) { kind in
+                        Text(kind.rawValue).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 210)
+
+                Spacer(minLength: 10)
+
+                Text("\(filteredItems.count) 个协作")
+                    .font(.system(size: 12, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -277,13 +289,9 @@ struct CollaborationSpaceView: View {
         } else {
             List {
                 Section {
-                    SearchListCard(
-                        query: $searchQuery,
-                        placeholder: "搜索群组或助手…",
-                        results: searchResults
-                    )
+                    searchAndFilterHeader
                 }
-                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
+                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 4, trailing: 0))
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
 
@@ -298,64 +306,76 @@ struct CollaborationSpaceView: View {
 
                 if nonSupervisorItems.isEmpty && supervisorItem == nil {
                     Section {
-                        ContentUnavailableView {
-                            Label("还没有群组或助手", systemImage: "person.2")
-                        } description: {
-                            Text("点击右上角 + 创建助手或群组，开启多智能体协作")
+                        if isSearching {
+                            ContentUnavailableView {
+                                Label("没有匹配的群组或助手", systemImage: "magnifyingglass")
+                            } description: {
+                                Text("换个关键词试试")
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 24)
+                        } else {
+                            ContentUnavailableView {
+                                Label("还没有群组或助手", systemImage: "person.2")
+                            } description: {
+                                Text("点击右上角 + 创建助手或群组，开启多智能体协作")
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 24)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 24)
                     }
                     .listRowBackground(Color.clear)
                 } else if !contactGroups.isEmpty {
                     ForEach(contactGroups) { group in
                         let groupEntries = nonSupervisorItems.filter { $0.groupId == group.groupId }
-                        let isCollapsed = collapsedGroupIDs.contains(group.groupId)
-                        Section {
-                            if !isCollapsed {
-                                ForEach(groupEntries) { item in
-                                    NavigationLink(value: CollabNavRoute.chat(threadID: item.threadId)) {
-                                        CollabContactRow(item: item, isSupervisorSlot: false)
-                                    }
-                                    .modifier(rowActions(for: item))
-                                }
-                            }
-                        } header: {
-                            HStack {
-                                Button {
-                                    withAnimation {
-                                        if isCollapsed {
-                                            collapsedGroupIDs.remove(group.groupId)
-                                        } else {
-                                            collapsedGroupIDs.insert(group.groupId)
+                        if !isSearching || !groupEntries.isEmpty {
+                            let isCollapsed = collapsedGroupIDs.contains(group.groupId) && !isSearching
+                            Section {
+                                if !isCollapsed {
+                                    ForEach(groupEntries) { item in
+                                        NavigationLink(value: CollabNavRoute.chat(threadID: item.threadId)) {
+                                            CollabContactRow(item: item, isSupervisorSlot: false)
                                         }
+                                        .modifier(rowActions(for: item))
                                     }
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                                            .font(.system(size: 11, weight: .semibold))
-                                        Text("\(group.name) (\(groupEntries.count))")
-                                    }
-                                    .foregroundStyle(.secondary)
                                 }
-                                .buttonStyle(.plain)
-                                Spacer()
-                                Menu {
+                            } header: {
+                                HStack {
                                     Button {
-                                        renameGroupDraft = group.name
-                                        renamingGroup = group
+                                        withAnimation {
+                                            if collapsedGroupIDs.contains(group.groupId) {
+                                                collapsedGroupIDs.remove(group.groupId)
+                                            } else {
+                                                collapsedGroupIDs.insert(group.groupId)
+                                            }
+                                        }
                                     } label: {
-                                        Label("重命名分组", systemImage: "pencil")
-                                    }
-                                    Button(role: .destructive) {
-                                        deleteContactGroup(group)
-                                    } label: {
-                                        Label("删除分组", systemImage: "trash")
-                                    }
-                                } label: {
-                                    Image(systemName: "ellipsis")
-                                        .font(.system(size: 12))
+                                        HStack(spacing: 6) {
+                                            Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                                                .font(.system(size: 11, weight: .semibold))
+                                            Text("\(group.name) (\(groupEntries.count))")
+                                        }
                                         .foregroundStyle(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    Spacer()
+                                    Menu {
+                                        Button {
+                                            renameGroupDraft = group.name
+                                            renamingGroup = group
+                                        } label: {
+                                            Label("重命名分组", systemImage: "pencil")
+                                        }
+                                        Button(role: .destructive) {
+                                            deleteContactGroup(group)
+                                        } label: {
+                                            Label("删除分组", systemImage: "trash")
+                                        }
+                                    } label: {
+                                        Image(systemName: "ellipsis")
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
@@ -403,8 +423,10 @@ struct CollaborationSpaceView: View {
                     }
                 }
             }
+            .contentMargins(.top, 8, for: .scrollContent)
             .listSectionSpacing(10)
-            .scrollDismissesKeyboard(.immediately)
+            .safeAreaPadding(.bottom, WorkspaceNavigationStore.bottomDockClearance)
+            .scrollDismissesKeyboard(.interactively)
             .refreshable { await reload() }
         }
     }
@@ -439,6 +461,7 @@ struct CollaborationSpaceView: View {
             async let spacesTask = client.collabSpaces(workspaceID: workspaceID)
             let fetchedSidebar = try await sidebarTask
             sidebarItems = fetchedSidebar
+            navStore.collabUnreadCount = fetchedSidebar.reduce(0) { $0 + max(0, $1.unreadCount) }
             for item in fetchedSidebar {
                 cachedSidebarByThreadID[item.threadId] = item
             }

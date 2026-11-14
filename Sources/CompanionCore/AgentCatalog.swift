@@ -1,10 +1,12 @@
 import Foundation
 
-/// An Agent configured in the desktop's settings, as listed by `conversation_catalog`.
+/// An Agent configured in the desktop's settings, as listed by `conversation_catalog`
+/// and gated for local installation eligibility via `agent_management_bar`.
 public struct CatalogAgent: Equatable, Sendable, Identifiable {
     public let id: String
     public let displayName: String
     public let usable: Bool
+    public let lifecycle: String?
     public let currentModeID: String?
     public let modes: [SessionMode]
     public let options: [ConfigOption]
@@ -13,6 +15,7 @@ public struct CatalogAgent: Equatable, Sendable, Identifiable {
         id: String,
         displayName: String,
         usable: Bool,
+        lifecycle: String? = nil,
         currentModeID: String?,
         modes: [SessionMode],
         options: [ConfigOption]
@@ -20,6 +23,7 @@ public struct CatalogAgent: Equatable, Sendable, Identifiable {
         self.id = id
         self.displayName = displayName
         self.usable = usable
+        self.lifecycle = lifecycle
         self.currentModeID = currentModeID
         self.modes = modes
         self.options = options
@@ -154,28 +158,90 @@ public enum AgentCatalogParser {
         return []
     }
 
-    public static func agents(from catalog: JSONValue) -> [CatalogAgent] {
-        (catalog["agents"]?.arrayValue ?? []).compactMap { item in
+    public static func agents(from catalog: JSONValue, managementBar: JSONValue? = nil) -> [CatalogAgent] {
+        let rawAgents = catalog["agents"]?.arrayValue ?? []
+
+        var managementRunnableIDs: Set<String>?
+        var managementPositions: [String: Int] = [:]
+        if let barRows = managementBar?.arrayValue, !barRows.isEmpty {
+            var runnable = Set<String>()
+            for (idx, row) in barRows.enumerated() {
+                guard let id = row["agent_id"]?.stringValue ?? row["agentId"]?.stringValue else { continue }
+                let pos: Int = {
+                    if case .number(let n)? = row["position"] { return Int(n) }
+                    return idx
+                }()
+                managementPositions[id] = pos
+
+                let enabled = (row["enabled"] == .bool(true))
+                let retired = (row["retired"] == .bool(true))
+                let lifecycle = (row["lifecycle"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let activeOp = (row["active_operation"]?.stringValue ?? row["activeOperation"]?.stringValue ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let localPath = (row["local_runtime"]?["path"]?.stringValue ?? row["localRuntime"]?["path"]?.stringValue ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if enabled && !retired && activeOp.isEmpty && (lifecycle == "ready" || !localPath.isEmpty) {
+                    runnable.insert(id)
+                }
+            }
+            managementRunnableIDs = runnable
+        }
+
+        let hasLifecycleSignal = rawAgents.contains {
+            !($0["lifecycle"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+
+        let indexed: [(Int, CatalogAgent)] = rawAgents.enumerated().compactMap { originalIdx, item in
             guard let id = item["id"]?.stringValue else { return nil }
-            var usable = false
-            if case .bool(let flag)? = item["usable"] { usable = flag }
+            var catalogUsable = false
+            if case .bool(let flag)? = item["usable"] { catalogUsable = flag }
+
+            let rawLifecycle = item["lifecycle"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedLifecycle = (rawLifecycle?.isEmpty == false) ? rawLifecycle : nil
             let rawModes = parseJSONArray(item["sessionModes"] ?? item["session_modes"] ?? item["sessionModesJson"] ?? item["session_modes_json"])
             let rawOptions = parseJSONArray(item["sessionConfig"] ?? item["session_config"] ?? item["sessionConfigJson"] ?? item["session_config_json"])
-            return CatalogAgent(
+            let modes = rawModes.compactMap(SessionStateBuilder.mode)
+            let options = rawOptions.compactMap(SessionStateBuilder.option)
+
+            let effectiveUsable: Bool
+            if let managementRunnableIDs {
+                effectiveUsable = catalogUsable && managementRunnableIDs.contains(id)
+            } else if hasLifecycleSignal {
+                let isInstalledByCatalog = (normalizedLifecycle?.lowercased() == "ready") || !options.isEmpty || !modes.isEmpty
+                effectiveUsable = catalogUsable && isInstalledByCatalog
+            } else {
+                effectiveUsable = catalogUsable
+            }
+
+            let agent = CatalogAgent(
                 id: id,
                 displayName: item["displayName"]?.stringValue ?? item["display_name"]?.stringValue ?? id,
-                usable: usable,
+                usable: effectiveUsable,
+                lifecycle: normalizedLifecycle,
                 currentModeID: item["currentMode"]?.stringValue ?? item["current_mode"]?.stringValue,
-                modes: rawModes.compactMap(SessionStateBuilder.mode),
-                options: rawOptions.compactMap(SessionStateBuilder.option)
+                modes: modes,
+                options: options
             )
+            return (originalIdx, agent)
         }
+
+        guard !managementPositions.isEmpty else {
+            return indexed.map(\.1)
+        }
+        return indexed.sorted { lhs, rhs in
+            let lPos = managementPositions[lhs.1.id] ?? (10_000 + lhs.0)
+            let rPos = managementPositions[rhs.1.id] ?? (10_000 + rhs.0)
+            if lPos != rPos { return lPos < rPos }
+            return lhs.0 < rhs.0
+        }.map(\.1)
     }
 }
 
 extension HostClient {
     public func agentCatalog() async throws -> [CatalogAgent] {
-        let catalog: JSONValue = try await call("conversation_catalog", as: JSONValue.self)
-        return AgentCatalogParser.agents(from: catalog)
+        async let catalogTask = call("conversation_catalog", as: JSONValue.self)
+        async let managementBarTask = try? call("agent_management_bar", as: JSONValue.self)
+        let (catalog, managementBar) = try await (catalogTask, managementBarTask)
+        return AgentCatalogParser.agents(from: catalog, managementBar: managementBar)
     }
 }

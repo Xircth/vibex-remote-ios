@@ -51,9 +51,21 @@ public struct ConversationListItem: Decodable, Identifiable, Equatable, Sendable
     public var updatedAt: Date? { Self.parseDate(updated_at) }
 
     static func parseDate(_ text: String) -> Date? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text)
+        if let d = fractional.date(from: trimmed) ?? ISO8601DateFormatter().date(from: trimmed) {
+            return d
+        }
+        let sqlite = DateFormatter()
+        sqlite.locale = Locale(identifier: "en_US_POSIX")
+        sqlite.timeZone = TimeZone(secondsFromGMT: 0)
+        for fmt in ["yyyy-MM-dd HH:mm:ss.SSSSSS", "yyyy-MM-dd HH:mm:ss.SSS", "yyyy-MM-dd HH:mm:ss"] {
+            sqlite.dateFormat = fmt
+            if let d = sqlite.date(from: trimmed) { return d }
+        }
+        return nil
     }
 }
 
@@ -166,6 +178,28 @@ public struct TimelineItem: Identifiable, Equatable, Sendable {
     /// Chronological blocks within an assistant turn (thinking, tool call runs, and text segments).
     public var segments: [TimelineSegment] = []
     public var durationMs: Int?
+
+    public init(
+        id: String,
+        role: Role,
+        text: String,
+        thinking: String = "",
+        tools: [ToolStep] = [],
+        plan: [PlanTask] = [],
+        changes: [FileChangeItem] = [],
+        segments: [TimelineSegment] = [],
+        durationMs: Int? = nil
+    ) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.thinking = thinking
+        self.tools = tools
+        self.plan = plan
+        self.changes = changes
+        self.segments = segments
+        self.durationMs = durationMs
+    }
 
     public var hasTrace: Bool { !thinking.isEmpty || !tools.isEmpty || !changes.isEmpty }
 }

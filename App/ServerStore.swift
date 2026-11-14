@@ -69,6 +69,12 @@ struct PendingCloudFallbackPrompt: Identifiable {
     let rttMs: Int
 }
 
+struct ConnectedSasNotice: Identifiable, Equatable {
+    let id = UUID()
+    let hostName: String
+    let sasCode: String
+}
+
 @Observable
 final class ServerStore {
     private(set) var profiles: [ServerProfile]
@@ -93,6 +99,7 @@ final class ServerStore {
     var pairingInProgress: Bool = false
     var pairingError: String?
     var pendingCloudFallback: PendingCloudFallbackPrompt?
+    var connectedSasNotice: ConnectedSasNotice?
     var isPresentingPairSheet: Bool = false
     var connectionSuccessCount: Int = 0
 
@@ -103,6 +110,7 @@ final class ServerStore {
 
     private var discoverTask: Task<Void, Never>?
     private var telemetryLoopTask: Task<Void, Never>?
+    private var sasNoticeTask: Task<Void, Never>?
     private var declinedCloudFallbackProfileIds = Set<String>()
     weak var accountStore: VibeXAccountStore?
 
@@ -182,14 +190,16 @@ final class ServerStore {
         return true
     }
 
-    /// Asks the desktop to approve this phone for the signed-in VibeX account, then adopts the issued credential.
+    /// Connects directly when both devices share one VibeX account (issuing the credential immediately
+    /// and surfacing the 4-digit SAS code non-blockingly), or waits for 1-click desktop confirmation
+    /// when connecting without a matching account.
     @MainActor
     func connectViaAccountRequest(
         origin: String,
         hostId: String,
         hostName: String,
         deviceName: String,
-        accountToken: String,
+        accountToken: String?,
         replaceExistingMobile: Bool,
         onAwaitingApproval: @MainActor (String) -> Void
     ) async throws {
@@ -206,26 +216,55 @@ final class ServerStore {
             replaceExistingMobile: replaceExistingMobile,
             accountToken: accountToken
         )
-        onAwaitingApproval(requested.sasCode)
-        let approved = try await client.awaitConnectApproval(origin: parsed, requestId: requested.requestId)
+        let approved: DeviceConnectRequestResult
+        let wasAutoApproved: Bool
+        if requested.status == "approved", requested.credential != nil {
+            approved = requested
+            wasAutoApproved = true
+        } else {
+            wasAutoApproved = false
+            onAwaitingApproval(requested.sasCode)
+            approved = try await client.awaitConnectApproval(origin: parsed, requestId: requested.requestId)
+        }
         guard let credential = approved.credential else { throw PairingError.connectExpired }
         try KeychainStore.save(credential.access_token, account: credential.device_id)
         let capabilities = try? await HostClient(origin: parsed, accessToken: credential.access_token).checkCapabilities()
         let resolvedName = (approved.hostName ?? hostName)
             .replacingOccurrences(of: ".local", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        adopt(
-            ServerProfile(
-                id: credential.device_id,
-                origin: parsed.value,
-                deviceName: deviceName,
-                serverVersion: capabilities?.server_version ?? "",
-                protocolVersion: capabilities?.protocol_version ?? PairingClient.clientProtocolVersion,
-                scopes: credential.scopes,
-                hostId: approved.hostId.isEmpty ? hostId : AccountDesktop.rawHostId(approved.hostId),
-                hostName: resolvedName.isEmpty ? nil : resolvedName
-            )
+        let profile = ServerProfile(
+            id: credential.device_id,
+            origin: parsed.value,
+            deviceName: deviceName,
+            serverVersion: capabilities?.server_version ?? "",
+            protocolVersion: capabilities?.protocol_version ?? PairingClient.clientProtocolVersion,
+            scopes: credential.scopes,
+            hostId: approved.hostId.isEmpty ? (hostId.isEmpty ? nil : hostId) : AccountDesktop.rawHostId(approved.hostId),
+            hostName: resolvedName.isEmpty ? nil : resolvedName
         )
+        adopt(profile)
+        if wasAutoApproved, !approved.sasCode.isEmpty {
+            presentConnectedSasNotice(hostName: profile.displayHost, sasCode: approved.sasCode)
+        }
+    }
+
+    @MainActor
+    func presentConnectedSasNotice(hostName: String, sasCode: String) {
+        sasNoticeTask?.cancel()
+        let notice = ConnectedSasNotice(hostName: hostName, sasCode: sasCode)
+        connectedSasNotice = notice
+        sasNoticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(4500))
+            guard !Task.isCancelled, self?.connectedSasNotice?.id == notice.id else { return }
+            self?.connectedSasNotice = nil
+        }
+    }
+
+    @MainActor
+    func dismissConnectedSasNotice() {
+        sasNoticeTask?.cancel()
+        sasNoticeTask = nil
+        connectedSasNotice = nil
     }
 
     /// `input` is a pasted or scanned invitation, or a bare 8-digit connection code.
@@ -507,8 +546,9 @@ final class ServerStore {
                     timeoutSeconds: 1.5,
                     expectedHostId: hostId
                 ) {
-                    // If the user originally connected via LAN direct, ask before switching to Cloud Service!
-                    if !active.isCloudService && probe.host.isCloudService {
+                    // Seamlessly switch to Cloud Service when the user's account allows cloud relay;
+                    // only prompt if the user is not signed into an account with cloud relay permission.
+                    if !active.isCloudService && probe.host.isCloudService && accountStore?.canUseCloudRelay == false {
                         isOnline = false
                         realtimeRttMs = nil
                         connectionFailureReason = "局域网已断开"

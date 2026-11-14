@@ -1,162 +1,260 @@
+import Observation
 import SwiftUI
 import UIKit
 
-/// Opens the nearest enclosing `SidebarDrawer`.
-struct OpenSidebarAction {
-    let action: () -> Void
+/// Coordinates Level-1 tab selection, Level-2+ stack depth visibility for the bottom floating capsule,
+/// global project filter synchronization, and the centered `+` New Thread trigger.
+@MainActor
+@Observable
+final class WorkspaceNavigationStore {
+    static let bottomDockClearance: CGFloat = 78
 
-    func callAsFunction() {
-        action()
+    var selection: AppTab = .conversations
+    var selectedProjectID: String?
+    var conversationsDepth: Int = 0
+    var boardDepth: Int = 0
+    var spaceDepth: Int = 0
+    var settingsDepth: Int = 0
+    var collabUnreadCount: Int = 0
+    var newThreadTrigger: Int = 0
+
+    var isCurrentTabAtRoot: Bool {
+        switch selection {
+        case .conversations:
+            return conversationsDepth == 0
+        case .board:
+            return boardDepth == 0
+        case .space:
+            return spaceDepth == 0
+        case .settings:
+            return settingsDepth == 0
+        }
+    }
+
+    func triggerNewThread() {
+        selection = .conversations
+        newThreadTrigger &+= 1
     }
 }
 
-extension EnvironmentValues {
-    @Entry var openSidebar = OpenSidebarAction {}
-}
+// MARK: - Bottom Floating Symmetrical Capsule Dock (Level-1 Only)
 
-/// Slide-out drawer shared by every destination: dimmed scrim, tap or swipe to close.
-struct SidebarDrawer<Content: View, Drawer: View>: View {
-    @Binding var isOpen: Bool
-    /// Off where pushed screens own the leading edge for the back swipe.
-    var opensOnEdgeSwipe = true
-    @ViewBuilder let content: Content
-    @ViewBuilder let drawer: Drawer
+/// Level-1 floating capsule navigation dock:
+/// - On `.conversations`: `[ 会话 ] [ 看板 ] [ (+) ] [ 协作 ] [ 设置 ]`
+/// - On `.board / .space / .settings`: `[ (+ ) ]` animates to zero width & zero gap so the 4 tabs
+///   smoothly expand to 4 equal widths without leaving any blank space in the middle.
+struct FloatingWorkspaceCapsuleDock: View {
+    @Bindable var navStore: WorkspaceNavigationStore
+    var attentionCount: Int = 0
+    @Namespace private var tabHighlightNamespace
+
+    private var showComposeButton: Bool {
+        navStore.selection == .conversations
+    }
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            content
-                .disabled(isOpen)
-                .environment(\.openSidebar, OpenSidebarAction { setOpen(true) })
+        HStack(spacing: 0) {
+            capsuleTabButton(.conversations, badgeCount: attentionCount)
+            capsuleTabButton(.board)
 
-            if isOpen {
-                Color.black.opacity(0.36)
-                    .ignoresSafeArea()
-                    .onTapGesture { setOpen(false) }
-                    .transition(.opacity)
-                    .zIndex(1)
-
-                drawer
-                    .frame(width: 304)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .background(
-                        Color(.secondarySystemGroupedBackground)
-                            .ignoresSafeArea()
-                    )
-                    .overlay(alignment: .trailing) {
-                        Rectangle()
-                            .fill(Color.primary.opacity(0.07))
-                            .frame(width: 0.5)
-                            .ignoresSafeArea()
+            ZStack {
+                if showComposeButton {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        navStore.triggerNewThread()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(Color(.systemBackground))
+                            .frame(width: 42, height: 42)
+                            .background(
+                                Circle()
+                                    .fill(Color.primary)
+                                    .shadow(color: .black.opacity(0.18), radius: 6, x: 0, y: 2)
+                            )
                     }
-                    .shadow(color: .black.opacity(0.18), radius: 18, x: 5, y: 0)
-                    .transition(.move(edge: .leading))
-                    .zIndex(2)
-            }
-        }
-        .gesture(
-            DragGesture(minimumDistance: 24, coordinateSpace: .local)
-                .onEnded { value in
-                    if opensOnEdgeSwipe && !isOpen && value.startLocation.x < 32 && value.translation.width > 64 {
-                        setOpen(true)
-                    } else if isOpen && value.translation.width < -60 {
-                        setOpen(false)
-                    }
+                    .buttonStyle(DockScaleButtonStyle())
+                    .accessibilityLabel("新建会话")
+                    .transition(.scale(scale: 0.35).combined(with: .opacity))
                 }
-        )
-    }
-
-    private func setOpen(_ open: Bool) {
-        dismissKeyboard()
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-            isOpen = open
-        }
-    }
-}
-
-/// Drawer holding only the app navigation, for destinations without their own sidebar content.
-struct AppNavigationDrawer<Content: View>: View {
-    @Binding var selection: AppTab
-    @ViewBuilder let content: Content
-    @State private var isOpen = false
-
-    var body: some View {
-        SidebarDrawer(isOpen: $isOpen, opensOnEdgeSwipe: false) {
-            content
-        } drawer: {
-            AppNavigationSection(selection: $selection) {
-                isOpen = false
             }
+            .frame(width: showComposeButton ? 54 : 0, height: 48)
+            .clipped()
+
+            capsuleTabButton(.space, badgeCount: navStore.collabUnreadCount)
+            capsuleTabButton(.settings)
         }
-    }
-}
-
-/// The four app destinations, shown at the top of every sidebar.
-struct AppNavigationSection: View {
-    @Binding var selection: AppTab
-    let onSelect: () -> Void
-
-    var body: some View {
-        VStack(spacing: 2) {
-            ForEach(AppTab.allCases) { tab in
-                row(tab)
-            }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .background {
+            Capsule(style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.09), lineWidth: 0.75)
+                )
+                .shadow(color: .black.opacity(0.14), radius: 18, x: 0, y: 8)
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
+        .padding(.horizontal, 18)
+        .padding(.bottom, 6)
+        .animation(.spring(response: 0.30, dampingFraction: 0.85), value: showComposeButton)
+        .animation(.spring(response: 0.26, dampingFraction: 0.86), value: navStore.selection)
     }
 
-    private func row(_ tab: AppTab) -> some View {
-        let isSelected = selection == tab
+    private func capsuleTabButton(_ tab: AppTab, badgeCount: Int = 0) -> some View {
+        let isSelected = navStore.selection == tab
         return Button {
             if !isSelected {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
             withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                selection = tab
-                onSelect()
+                navStore.selection = tab
             }
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: isSelected ? tab.selectedIcon : tab.icon)
-                    .font(.system(size: 16, weight: isSelected ? .semibold : .regular))
-                    .frame(width: 22)
+            VStack(spacing: 2.5) {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: isSelected ? tab.selectedIcon : tab.icon)
+                        .font(.system(size: 16.5, weight: isSelected ? .semibold : .medium))
+                        .frame(width: 24, height: 20)
+
+                    if badgeCount > 0 {
+                        Text(badgeCount > 99 ? "99+" : "\(badgeCount)")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .monospacedDigit()
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4.5)
+                            .frame(minWidth: 15, minHeight: 15)
+                            .background(Capsule().fill(Color.accentColor))
+                            .offset(x: 9, y: -5)
+                    }
+                }
+
                 Text(tab.title)
-                    .font(.system(size: 15, weight: isSelected ? .semibold : .medium))
-                Spacer(minLength: 0)
+                    .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
+                    .lineLimit(1)
             }
-            .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected ? Color.accentColor.opacity(0.11) : Color.clear)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
+            .background {
+                if isSelected {
+                    Capsule(style: .continuous)
+                        .fill(Color.primary.opacity(0.10))
+                        .matchedGeometryEffect(id: "activeCapsuleTab", in: tabHighlightNamespace)
+                }
+            }
+            .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
-/// Leading top-bar button that opens the enclosing sidebar.
-struct SidebarButton: View {
-    @Environment(\.openSidebar) private var openSidebar
+// MARK: - Shared Level-2 Floating Header Chrome
+
+/// Circular `<` back button used by Level-2 workspace screens (`新建会话` and `会话详情`).
+struct FloatingCircleBackButton: View {
+    let action: () -> Void
 
     var body: some View {
         Button {
-            openSidebar()
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            dismissKeyboard()
+            action()
         } label: {
-            Image(systemName: "sidebar.left")
-                .font(.system(size: 16.5, weight: .medium))
+            Image(systemName: "chevron.left")
+                .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.primary)
-                .frame(width: 36, height: 36)
+                .frame(width: 40, height: 40)
                 .background(
                     Circle()
                         .fill(Color(.secondarySystemGroupedBackground))
+                        .shadow(color: .black.opacity(0.06), radius: 8, x: 0, y: 2)
+                )
+                .overlay(
+                    Circle()
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.65)
                 )
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("打开侧边栏")
+        .buttonStyle(DockScaleButtonStyle())
+        .accessibilityLabel("返回")
+    }
+}
+
+/// Top-right unified dual-icon capsule `[ ⑂ 代码变更 | 📁 项目文件 ]` used on Level-2 workspace screens.
+struct WorkspaceDualToolsCapsule: View {
+    var changeCount: Int = 0
+    var isDisabled: Bool = false
+    let onOpenChanges: () -> Void
+    let onOpenFiles: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                dismissKeyboard()
+                onOpenChanges()
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .frame(width: 42, height: 40)
+                        .contentShape(Rectangle())
+
+                    if changeCount > 0 {
+                        Text(changeCount > 99 ? "99" : "\(changeCount)")
+                            .font(.system(size: 9, weight: .bold))
+                            .monospacedDigit()
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 4)
+                            .frame(minWidth: 14, minHeight: 14)
+                            .background(Capsule().fill(Color.orange))
+                            .offset(x: -4, y: 5)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(isDisabled)
+            .accessibilityLabel(changeCount > 0 ? "代码差异（\(changeCount) 处改动）" : "代码差异")
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.09))
+                .frame(width: 0.65, height: 18)
+
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                dismissKeyboard()
+                onOpenFiles()
+            } label: {
+                Image(systemName: "folder")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: 42, height: 40)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isDisabled)
+            .accessibilityLabel("浏览项目文件")
+        }
+        .padding(.horizontal, 2)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+                .shadow(color: .black.opacity(0.06), radius: 8, x: 0, y: 2)
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.65)
+        )
+        .opacity(isDisabled ? 0.45 : 1)
+    }
+}
+
+private struct DockScaleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+            .animation(.timingCurve(0.23, 1, 0.32, 1, duration: 0.15), value: configuration.isPressed)
     }
 }
