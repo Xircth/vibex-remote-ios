@@ -1,6 +1,5 @@
 import CompanionCore
 import SwiftUI
-import UIKit
 
 enum AppTab: Hashable, CaseIterable, Identifiable {
     case conversations
@@ -12,17 +11,17 @@ enum AppTab: Hashable, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .conversations: return "对话"
+        case .conversations: return "会话"
         case .board: return "看板"
-        case .space: return "协作空间"
+        case .space: return "协作"
         case .settings: return "设置"
         }
     }
 
     var icon: String {
         switch self {
-        case .conversations: return "message"
-        case .board: return "square.grid.2x2"
+        case .conversations: return "bubble.left"
+        case .board: return "chart.bar"
         case .space: return "person.2"
         case .settings: return "gearshape"
         }
@@ -30,8 +29,8 @@ enum AppTab: Hashable, CaseIterable, Identifiable {
 
     var selectedIcon: String {
         switch self {
-        case .conversations: return "message.fill"
-        case .board: return "square.grid.2x2.fill"
+        case .conversations: return "bubble.left.fill"
+        case .board: return "chart.bar.fill"
         case .space: return "person.2.fill"
         case .settings: return "gearshape.fill"
         }
@@ -41,121 +40,82 @@ enum AppTab: Hashable, CaseIterable, Identifiable {
 struct RootTabView: View {
     @Environment(ServerStore.self) private var servers
     @Environment(AppAppearanceStore.self) private var appearance
-    @Namespace private var tabNamespace
-    @State private var selection: AppTab = .conversations
+    @State private var navStore = WorkspaceNavigationStore()
     @State private var attentionCenter = CompanionAttentionCenter()
-    @State private var isConversationsChromeHidden = false
-    @State private var isBoardChromeHidden = false
-    @State private var isSpaceChromeHidden = false
-    @State private var isLaunchRevealed = false
-    @State private var isKeyboardVisible = false
 
     private var activeClient: HostClient? {
         guard let profile = servers.activeProfile else { return nil }
         return servers.client(for: profile)
     }
 
-    private var shouldShowBottomBar: Bool {
-        if isKeyboardVisible { return false }
-        switch selection {
-        case .conversations:
-            return !isConversationsChromeHidden
-        case .board:
-            return !isBoardChromeHidden
-        case .space:
-            return !isSpaceChromeHidden
-        case .settings:
-            return true
+    /// Ensures the floating dock is also hidden when disconnected on a server-backed tab?
+    /// Wait: on Level 1 (`isCurrentTabAtRoot`), even when disconnected, keeping the floating dock
+    /// visible lets the user switch between `会话 / 看板 / 协作 / 设置` freely!
+    /// And when disconnected, `conversationsDepth / boardDepth / spaceDepth` reset to 0.
+    private var shouldShowFloatingDock: Bool {
+        if activeClient == nil || !servers.isSessionConnected {
+            return navStore.selection != .settings || navStore.settingsDepth == 0
         }
-    }
-
-    private var isBottomBarRevealed: Bool {
-        isLaunchRevealed || servers.activeProfile == nil || selection != .conversations
+        return navStore.isCurrentTabAtRoot
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            ZStack {
-                RequiresServer(selection: $selection) { client in
-                    ConversationsView(
-                        client: client,
-                        onChromeHiddenChange: { hidden in
-                            withAnimation(.smooth(duration: 0.2)) {
-                                isConversationsChromeHidden = hidden
-                            }
-                        },
-                        onLaunchRevealedChange: { revealed in
-                            withAnimation(.spring(response: 1.05, dampingFraction: 0.86, blendDuration: 0.2)) {
-                                isLaunchRevealed = revealed
-                            }
-                        },
-                        onSelectTab: { targetTab in
-                            withAnimation(.smooth(duration: 0.16)) {
-                                selection = targetTab
-                            }
-                        }
-                    )
-                }
-                .opacity(selection == .conversations ? 1 : 0)
-                .allowsHitTesting(selection == .conversations)
-
-                if selection == .board {
-                    RequiresServer(selection: $selection) {
-                        BoardView(
-                            client: $0,
-                            onChromeHiddenChange: { hidden in
-                                withAnimation(.smooth(duration: 0.2)) {
-                                    isBoardChromeHidden = hidden
-                                }
-                            }
-                        )
-                    }
-                    .transition(.opacity)
-                } else if selection == .space {
-                    RequiresServer(selection: $selection) {
-                        CollaborationSpaceView(
-                            client: $0,
-                            onChromeHiddenChange: { hidden in
-                                withAnimation(.smooth(duration: 0.2)) {
-                                    isSpaceChromeHidden = hidden
-                                }
-                            }
-                        )
-                    }
-                    .transition(.opacity)
-                } else if selection == .settings {
-                    SettingsView()
-                        .transition(.opacity)
-                }
+        @Bindable var bindableNav = navStore
+        ZStack {
+            RequiresServer(selection: $bindableNav.selection) { client in
+                ConversationsView(client: client, selection: $bindableNav.selection)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if shouldShowBottomBar {
-                    Color.clear.frame(height: 66)
-                }
-            }
+            .opacity(navStore.selection == .conversations ? 1 : 0)
+            .allowsHitTesting(navStore.selection == .conversations)
 
-            if shouldShowBottomBar {
-                bottomNavigationBar
-                    .opacity(isBottomBarRevealed ? 1 : 0)
-                    .offset(y: isBottomBarRevealed ? 0 : 36)
-                    .blur(radius: isBottomBarRevealed ? 0 : 3)
-                    .allowsHitTesting(isBottomBarRevealed)
+            if navStore.selection == .board {
+                RequiresServer(selection: $bindableNav.selection) { client in
+                    BoardView(client: client)
+                }
+                .transition(.opacity)
+            } else if navStore.selection == .space {
+                RequiresServer(selection: $bindableNav.selection) { client in
+                    CollaborationSpaceView(client: client)
+                }
+                .transition(.opacity)
+            } else if navStore.selection == .settings {
+                SettingsView()
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .environment(navStore)
+        .environment(attentionCenter)
+        .overlay(alignment: .bottom) {
+            if shouldShowFloatingDock {
+                FloatingWorkspaceCapsuleDock(navStore: navStore)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .environment(attentionCenter)
+        .animation(.spring(response: 0.30, dampingFraction: 0.86), value: shouldShowFloatingDock)
         .overlay(alignment: .top) {
-            if let client = activeClient {
-                CompanionToastOverlay(
-                    client: client,
-                    center: attentionCenter,
-                    onOpenConversation: { conversation in
-                        selection = .conversations
-                        attentionCenter.openConversation(conversation)
+            VStack(spacing: 8) {
+                if let sasNotice = servers.connectedSasNotice {
+                    ConnectedSasCapsuleView(notice: sasNotice) {
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            servers.dismissConnectedSasNotice()
+                        }
                     }
-                )
+                    .padding(.top, 6)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                if let client = activeClient {
+                    CompanionToastOverlay(
+                        client: client,
+                        center: attentionCenter,
+                        onOpenConversation: { conversation in
+                            navStore.selection = .conversations
+                            attentionCenter.openConversation(conversation)
+                        }
+                    )
+                }
             }
+            .animation(.spring(response: 0.30, dampingFraction: 0.86), value: servers.connectedSasNotice)
         }
         .task(id: servers.activeProfile?.id) {
             guard let client = activeClient else { return }
@@ -164,23 +124,13 @@ struct RootTabView: View {
                 try? await Task.sleep(for: .milliseconds(1500))
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            withAnimation(.easeOut(duration: 0.18)) {
-                isKeyboardVisible = true
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            withAnimation(.easeOut(duration: 0.18)) {
-                isKeyboardVisible = false
-            }
-        }
         .dynamicTypeSize(appearance.fontSizePreset.dynamicTypeSize)
         .fontDesign(appearance.fontStylePreset.fontDesign)
         .preferredColorScheme(appearance.themeMode.colorScheme)
         .onAppear {
             appearance.applyInterfaceStyleToAllWindows(appearance.themeMode.uiInterfaceStyle)
         }
-        .onChange(of: selection) { _, newTab in
+        .onChange(of: navStore.selection) { _, newTab in
             dismissKeyboard()
             if newTab == .conversations {
                 NotificationCenter.default.post(name: Notification.Name("vibex.didReturnToConversationsTab"), object: nil)
@@ -192,67 +142,50 @@ struct RootTabView: View {
                 .allowsHitTesting(false)
         )
     }
+}
 
-    private var bottomNavigationBar: some View {
-        HStack(spacing: 4) {
-            ForEach(AppTab.allCases) { tab in
-                let isSelected = selection == tab
-                Button {
-                    if selection != tab {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                            selection = tab
-                        }
-                    }
-                } label: {
-                    VStack(spacing: 2.5) {
-                        Image(systemName: isSelected ? tab.selectedIcon : tab.icon)
-                            .font(.system(size: 16.5, weight: isSelected ? .semibold : .regular))
-                            .frame(height: 19)
+private struct ConnectedSasCapsuleView: View {
+    let notice: ConnectedSasNotice
+    let onDismiss: () -> Void
 
-                        Text(tab.title)
-                            .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .background {
-                        if isSelected {
-                            Capsule(style: .continuous)
-                                .fill(Color.accentColor.opacity(0.11))
-                                .matchedGeometryEffect(id: "activeTabPill", in: tabNamespace)
-                        }
-                    }
-                    .contentShape(Capsule(style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(tab.title)
+    var body: some View {
+        Button(action: onDismiss) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.green)
+
+                Text("已连接 \(notice.hostName)")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Text("连接码 \(notice.sasCode)")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.accentColor.opacity(0.12))
+                    )
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.10), radius: 10, y: 4)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.6)
+            )
         }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 4)
-        .background(
-            .ultraThinMaterial,
-            in: Capsule(style: .continuous)
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.24),
-                            Color.primary.opacity(0.08),
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 0.6
-                )
-        )
-        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
-        .padding(.horizontal, 22)
-        .padding(.bottom, 6)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .accessibilityLabel("已连接 \(notice.hostName)，连接码 \(notice.sasCode)")
     }
 }
 

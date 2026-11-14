@@ -39,18 +39,31 @@ struct PairingCodeForm: View {
     @State private var quickCode = ""
     @State private var scanning = false
     @State private var submittingCode = false
+    @State private var awaitingLanSas: (hostName: String, sasCode: String)?
+    @State private var connectingLanHostId: String?
+    @State private var lanConnectTask: Task<Void, Never>?
     @State private var localError: String?
     @State private var localMobileConflict: PendingMobileConflict?
     @State private var didAppear = false
 
+    private var lanHosts: [DiscoveredLanHost] {
+        servers.discoveredHosts.filter { !$0.isCloudService }
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                Spacer(minLength: 24)
+                Spacer(minLength: 20)
 
                 Image(systemName: "qrcode.viewfinder")
                     .font(.system(size: 38, weight: .regular))
                     .foregroundStyle(Color.secondary)
+
+                if let awaiting = awaitingLanSas {
+                    lanSasComparisonCard(hostName: awaiting.hostName, sasCode: awaiting.sasCode)
+                } else if !lanHosts.isEmpty {
+                    discoveredLanCard
+                }
 
                 inlineCodeAndScanCard
 
@@ -111,8 +124,146 @@ struct PairingCodeForm: View {
         .onAppear {
             guard !didAppear else { return }
             didAppear = true
+            servers.discoverHosts()
             if startWithScanner {
                 scanning = true
+            }
+        }
+        .onDisappear {
+            lanConnectTask?.cancel()
+            lanConnectTask = nil
+        }
+    }
+
+    private var discoveredLanCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("当前 Wi-Fi 发现电脑（免输码，对比连接码即连）")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 4)
+
+            VStack(spacing: 0) {
+                ForEach(Array(lanHosts.enumerated()), id: \.element.id) { index, host in
+                    if index > 0 {
+                        Divider().padding(.leading, 14)
+                    }
+                    let isBusy = connectingLanHostId == host.id
+                    Button {
+                        connectLanHost(host)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "desktopcomputer")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(Color.accentColor)
+                            Text(host.displayName)
+                                .font(.system(size: 14.5, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            Spacer()
+                            if isBusy {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Text("连接")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        Capsule(style: .continuous)
+                                            .fill(Color.accentColor)
+                                    )
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 11)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(connectingLanHostId != nil || submittingCode)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
+                    )
+            )
+        }
+    }
+
+    private func lanSasComparisonCard(hostName: String, sasCode: String) -> some View {
+        VStack(spacing: 10) {
+            Text("连接「\(hostName)」")
+                .font(.system(size: 15, weight: .semibold))
+            Text("对比电脑顶部显示的连接码一致后，点击「连接」")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Text(sasCode)
+                .font(.system(size: 28, weight: .bold, design: .monospaced))
+                .monospacedDigit()
+                .kerning(3)
+                .foregroundStyle(Color.accentColor)
+            Button("取消等待") {
+                lanConnectTask?.cancel()
+                lanConnectTask = nil
+                connectingLanHostId = nil
+                awaitingLanSas = nil
+            }
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75)
+                )
+        )
+    }
+
+    private func connectLanHost(_ host: DiscoveredLanHost, replaceExistingMobile: Bool = false) {
+        localError = nil
+        connectingLanHostId = host.id
+        lanConnectTask?.cancel()
+        lanConnectTask = Task { @MainActor in
+            defer {
+                connectingLanHostId = nil
+                awaitingLanSas = nil
+            }
+            do {
+                try await servers.connectViaAccountRequest(
+                    origin: host.origin,
+                    hostId: host.hostId.map(AccountDesktop.rawHostId) ?? "",
+                    hostName: host.displayName,
+                    deviceName: UIDevice.current.name,
+                    accountToken: servers.accountStore?.token,
+                    replaceExistingMobile: replaceExistingMobile,
+                    onAwaitingApproval: { sasCode in
+                        self.awaitingLanSas = (hostName: host.displayName, sasCode: sasCode)
+                    }
+                )
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } catch is CancellationError {
+                return
+            } catch let PairingError.mobileDeviceConflict(existingName) {
+                localMobileConflict = PendingMobileConflict(
+                    existingDeviceName: existingName,
+                    currentDeviceName: UIDevice.current.name
+                ) {
+                    connectLanHost(host, replaceExistingMobile: true)
+                }
+            } catch {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                localError = ServerStore.sanitizeError(error)
             }
         }
     }

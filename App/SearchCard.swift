@@ -69,6 +69,93 @@ struct ConnectedDeviceBar: View {
     }
 }
 
+/// Unified native-feel search bar used across primary tabs (`会话`, `协作空间`, etc.):
+/// crisp single-layer surface (no clipped cell shadows), focus accent ring, instant clear button,
+/// and smooth trailing `取消` button when active.
+struct UnifiedSearchBar: View {
+    @Binding var query: String
+    let placeholder: String
+
+    @FocusState private var isFocused: Bool
+
+    private var isActive: Bool {
+        isFocused || !query.isEmpty
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 14.5, weight: .medium))
+                    .foregroundStyle(isFocused ? Color.accentColor : Color.secondary)
+
+                TextField(placeholder, text: $query)
+                    .font(.system(size: 15))
+                    .foregroundStyle(.primary)
+                    .focused($isFocused)
+                    .textFieldStyle(.plain)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+                    .onSubmit {
+                        isFocused = false
+                    }
+
+                if !query.isEmpty {
+                    Button {
+                        query = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 15))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("清除搜索")
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(
+                        isFocused ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.06),
+                        lineWidth: isFocused ? 1.0 : 0.6
+                    )
+            )
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if !isFocused {
+                    isFocused = true
+                }
+            }
+
+            if isActive {
+                Button {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        query = ""
+                        isFocused = false
+                    }
+                    dismissKeyboard()
+                } label: {
+                    Text("取消")
+                        .font(.system(size: 14.5, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.leading, 2)
+                }
+                .buttonStyle(.plain)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: isActive)
+    }
+}
+
 /// SwiftUI port of the SearchList + GlideMenu card:
 /// a 40pt input row with clear button, live-filtered GlideMenu results, and a centered empty state.
 struct SearchListCard: View {
@@ -248,7 +335,6 @@ struct SearchListCard: View {
             GeometryReader { geo in
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Color(.secondarySystemGroupedBackground))
-                    .shadow(color: .black.opacity(0.06), radius: 10, y: 3)
                     .onAppear {
                         cardGlobalFrame = geo.frame(in: .global)
                     }

@@ -28,7 +28,12 @@ struct VibeXCompanionApp: App {
                 account.attach(serverStore: servers)
             }
             .onChange(of: account.completedSignIns) { _, _ in
-                connectFlow.presentPicker(servers: servers)
+                connectFlow.autoConnectOnSignIn(servers: servers, account: account)
+            }
+            .onChange(of: account.desktops.count) { _, count in
+                if count == 1 {
+                    connectFlow.autoConnectInitialIfNeeded(servers: servers, account: account)
+                }
             }
             .onChange(of: servers.connectionSuccessCount) { _, _ in
                 account.waiveLoginRequirement()

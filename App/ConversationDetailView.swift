@@ -29,25 +29,35 @@ struct ConversationDetailView: View {
         !userDetachedFromBottom && !isUserDraggingScroll && distanceFromBottom <= bottomSafeZoneThreshold
     }
 
-    var onToggleSidebar: (() -> Void)?
-    var onReturnToLanding: (() -> Void)?
+    @Environment(\.dismiss) private var dismiss
+    var onBack: (() -> Void)?
+    var onMessageSent: ((String) -> Void)?
+    var onTurnFinishedWhileViewing: (() -> Void)?
 
     init(
         client: HostClient,
         conversation: ConversationListItem,
-        onToggleSidebar: (() -> Void)? = nil,
-        onReturnToLanding: (() -> Void)? = nil
+        initialPrompt: PendingInitialPrompt? = nil,
+        onBack: (() -> Void)? = nil,
+        onMessageSent: ((String) -> Void)? = nil,
+        onTurnFinishedWhileViewing: (() -> Void)? = nil
     ) {
-        _model = State(initialValue: ConversationModel(client: client, conversation: conversation))
-        self.onToggleSidebar = onToggleSidebar
-        self.onReturnToLanding = onReturnToLanding
+        _model = State(
+            initialValue: ConversationModel(
+                client: client,
+                conversation: conversation,
+                initialPrompt: initialPrompt
+            )
+        )
+        self.onBack = onBack
+        self.onMessageSent = onMessageSent
+        self.onTurnFinishedWhileViewing = onTurnFinishedWhileViewing
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            if onToggleSidebar != nil {
-                embeddedHeaderBar
-            }
+            levelTwoHeaderBar
+
             messages
                 .overlay {
                     if menu != nil {
@@ -55,7 +65,7 @@ struct ConversationDetailView: View {
                     }
                 }
             if !model.items.currentPlan.isEmpty {
-                TaskDock(tasks: model.items.currentPlan, running: model.session.isTurnRunning)
+                TaskDock(tasks: model.items.currentPlan, running: model.isThinkingOrRunning)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
             }
@@ -80,37 +90,10 @@ struct ConversationDetailView: View {
                     .padding(.horizontal, 16)
                     .padding(.top, 6)
             }
-            if totalChangeCount > 0 {
-                changesSummaryBar(count: totalChangeCount)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 6)
-            }
-            promptBar.padding(.top, totalChangeCount > 0 ? 4 : 8)
+            promptBar.padding(.top, 6)
         }
-        .navigationTitle(model.conversation.title ?? "未命名对话")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(onToggleSidebar != nil ? .hidden : .visible, for: .navigationBar)
-        .toolbar(onToggleSidebar != nil ? .visible : .hidden, for: .tabBar)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Menu("新对话", systemImage: "square.and.pencil") {
-                        ForEach(model.newConversationAgents) { agent in
-                            Button {
-                                Task { created = await model.createConversation(agentID: agent.id) }
-                            } label: {
-                                AgentMenuLabel(agentID: agent.id, hostName: agent.displayName)
-                            }
-                        }
-                    }
-                    Button("浏览文件", systemImage: "folder") { panel = .files }
-                    Button("代码差异", systemImage: "plus.forwardslash.minus") { panel = .changes }
-                } label: {
-                    Image(systemName: "ellipsis")
-                }
-                .accessibilityLabel("更多")
-            }
-        }
+        .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
         .sheet(item: $panel) { panel in
             switch panel {
             case .files:
@@ -139,6 +122,11 @@ struct ConversationDetailView: View {
         .navigationDestination(item: $created) { ConversationDetailView(client: model.client, conversation: $0) }
         .background { Color(.systemGroupedBackground).ignoresSafeArea() }
         .task {
+            if let failedDraft = await model.dispatchInitialPromptIfNeeded() {
+                draft = failedDraft
+            }
+        }
+        .task {
             while !Task.isCancelled {
                 await model.reload()
                 if model.isActivelyStreaming {
@@ -156,158 +144,68 @@ struct ConversationDetailView: View {
                 workspaceDiffCount = diffs.count
             }
         }
-        .onChange(of: model.session.isTurnRunning) { _, running in
+        .onChange(of: model.isThinkingOrRunning) { wasRunning, running in
             if !running {
+                let shouldMarkViewed = wasRunning
+                    && model.session.pendingPermissions.isEmpty
+                    && model.session.pendingQuestions.isEmpty
                 Task {
+                    if shouldMarkViewed {
+                        try? await model.client.markSessionViewed(sessionID: model.conversation.id)
+                        onTurnFinishedWhileViewing?()
+                    }
                     if let diffs = try? await model.client.workspaceDiff(workspaceID: model.conversation.workspace_id) {
                         workspaceDiffCount = diffs.count
                     }
                 }
             }
         }
-        .onChange(of: menu) { _, kind in
-            if kind == .model || kind == .plusModel { Task { await model.refreshCatalog() } }
-        }
     }
 
-    private func changesSummaryBar(count: Int) -> some View {
-        HStack(spacing: 10) {
-            Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                panel = .changes
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text("\(count) CHANGES")
-                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                        .tracking(0.3)
-                        .foregroundStyle(.primary.opacity(0.88))
+    private var levelTwoHeaderBar: some View {
+        HStack(spacing: 12) {
+            FloatingCircleBackButton {
+                if let onBack {
+                    onBack()
+                } else {
+                    dismiss()
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Color(.secondarySystemGroupedBackground))
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.75)
-                )
             }
-            .buttonStyle(.plain)
 
-            Spacer()
-
-            Button {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                panel = .files
-            } label: {
-                Image(systemName: "folder")
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 26, height: 26)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color(.secondarySystemGroupedBackground))
-                    )
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("浏览文件")
-        }
-    }
-
-    private var embeddedHeaderBar: some View {
-        HStack(spacing: 10) {
-            Button {
-                dismissKeyboard()
-                onToggleSidebar?()
-            } label: {
-                Image(systemName: "sidebar.left")
-                    .font(.system(size: 16.5, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .frame(width: 36, height: 36)
-                    .background(
-                        Circle()
-                            .fill(Color(.secondarySystemGroupedBackground))
-                    )
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("打开侧边栏")
-
-            VStack(spacing: 1.5) {
-                HStack(spacing: 5) {
-                    if model.session.isTurnRunning {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    if model.isThinkingOrRunning {
                         Circle()
                             .fill(Color.orange)
-                            .frame(width: 6.5, height: 6.5)
+                            .frame(width: 7, height: 7)
                     }
-                    Text(model.conversation.title ?? "未命名对话")
-                        .font(.system(size: 15.5, weight: .semibold))
+                    Text(model.conversation.title ?? "未命名会话")
+                        .font(.system(size: 16.5, weight: .bold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                 }
 
-                HStack(spacing: 4) {
-                    AgentIconView(agent: model.conversation.agent_id, size: 11)
+                HStack(spacing: 4.5) {
+                    AgentIconView(agent: model.conversation.agent_id, size: 11.5)
                     Text(model.currentModelLabel ?? AgentBrand.displayName(model.conversation.agent_id))
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 11.5, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
-            .frame(maxWidth: .infinity)
 
-            HStack(spacing: 6) {
-                if let onReturnToLanding {
-                    Button {
-                        dismissKeyboard()
-                        onReturnToLanding()
-                    } label: {
-                        Image(systemName: "square.and.pencil")
-                            .font(.system(size: 15.5, weight: .medium))
-                            .foregroundStyle(.primary)
-                            .frame(width: 36, height: 36)
-                            .background(
-                                Circle()
-                                    .fill(Color(.secondarySystemGroupedBackground))
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("新建对话")
-                }
+            Spacer(minLength: 6)
 
-                Menu {
-                    Button("浏览项目文件", systemImage: "folder") { panel = .files }
-                    Button("查看代码变更 (Diff)", systemImage: "plus.forwardslash.minus") { panel = .changes }
-                    if let onReturnToLanding {
-                        Divider()
-                        Button("回到新对话工作台", systemImage: "sparkles") {
-                            onReturnToLanding()
-                        }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 15.5, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .frame(width: 36, height: 36)
-                        .background(
-                            Circle()
-                                .fill(Color(.secondarySystemGroupedBackground))
-                        )
-                }
-                .accessibilityLabel("更多操作")
-            }
+            WorkspaceDualToolsCapsule(
+                changeCount: totalChangeCount,
+                onOpenChanges: { panel = .changes },
+                onOpenFiles: { panel = .files }
+            )
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(
-            Color(.systemGroupedBackground)
-                .overlay(alignment: .bottom) {
-                    Divider().opacity(0.45)
-                }
-        )
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
+        .background(Color(.systemGroupedBackground))
     }
 
     // MARK: Prompt bar
@@ -316,16 +214,15 @@ struct ConversationDetailView: View {
         PromptBar(
             draft: $draft,
             menu: $menu,
-            isRunning: model.session.isTurnRunning,
+            isRunning: model.isThinkingOrRunning,
             busy: model.busy,
             hasAlert: !model.session.pendingPermissions.isEmpty,
             modelName: model.currentModelLabel,
             agentID: model.conversation.agent_id,
+            agentName: AgentBrand.displayName(model.conversation.agent_id, hostName: model.currentAgent?.displayName),
             modelChoices: modelChoices,
-            otherModelGroups: otherModelGroups,
-            otherAgentNote: otherModelGroups.isEmpty
-                ? nil
-                : "此对话使用 \(model.currentAgent?.displayName ?? "当前 Agent")，换 Agent 请新建对话",
+            otherModelGroups: [],
+            otherAgentNote: nil,
             accessChoices: model.accessModes.map {
                 PromptChoice(
                     id: $0.id,
@@ -340,11 +237,20 @@ struct ConversationDetailView: View {
             },
             effort: effort,
             openFiles: { panel = .files },
-            send: {
-                let text = draft
+            onRefreshCatalog: { Task { await model.refreshCatalog() } },
+            send: {},
+            sendText: { sentText in
                 userDetachedFromBottom = false
+                isUserDraggingScroll = false
+                distanceFromBottom = 0
                 unreadMessageUpdates = 0
-                Task { if await model.send(text) { draft = "" } }
+                onMessageSent?(sentText)
+                Task {
+                    let ok = await model.send(sentText)
+                    if !ok {
+                        draft = sentText
+                    }
+                }
             },
             stop: { Task { await model.cancelTurn() } },
             pickModel: { id in
@@ -428,18 +334,6 @@ struct ConversationDetailView: View {
         return choices
     }
 
-    private var otherModelGroups: [PromptGroup] {
-        model.otherAgentsWithModels.map { agent in
-            PromptGroup(
-                title: AgentBrand.displayName(agent.id, hostName: agent.displayName),
-                agentID: agent.id,
-                choices: agent.modelOptions.flatMap(\.choices).map {
-                    PromptChoice(id: agent.id + "|" + $0.id, title: $0.label, agentID: agent.id, enabled: false)
-                }
-            )
-        }
-    }
-
     private func findModelChoice(_ id: String) -> (ConfigOption, ConfigChoice)? {
         for option in model.modelOptions {
             if let choice = option.choices.first(where: { option.key + "|" + $0.id == id }) {
@@ -492,13 +386,13 @@ struct ConversationDetailView: View {
                                             agentID: model.conversation.agent_id,
                                             modelName: model.currentModelLabel,
                                             isLast: item.id == model.items.last?.id,
-                                            running: model.session.isTurnRunning,
+                                            running: model.isThinkingOrRunning,
                                             openDiff: { diffChange = $0 }
                                         )
                                         .frame(width: contentWidth, alignment: .leading)
                                         .id(item.id)
                                     }
-                                    if model.session.isTurnRunning && model.items.last?.role != .assistant {
+                                    if model.isThinkingOrRunning && model.items.last?.role != .assistant {
                                         LoadingState(label: "正在思考").id("loading")
                                     }
                                     Color.clear

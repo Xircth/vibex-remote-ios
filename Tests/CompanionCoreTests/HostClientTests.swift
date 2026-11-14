@@ -288,6 +288,35 @@ private final class RecordingTransport: HttpTransport, @unchecked Sendable {
     #expect(agents[0].currentModeID == "full")
 }
 
+@Test func catalogMarksUninstalledBuiltInAgentsUnusableViaManagementBarAndLifecycleFallback() throws {
+    let catalogRaw = """
+    {"projects":[],"workspaces":[],"agents":[
+      {"id":"claude_code","usable":true,"lifecycle":"ready","displayName":"Claude Code",
+       "sessionConfig":[{"key":"model","label":"Model","category":"model","value":"opus","choices":[{"value":"opus","label":"Opus 5 (opus)"}]}]},
+      {"id":"codex","usable":true,"lifecycle":"ready","displayName":"Codex",
+       "sessionConfig":[{"key":"model","label":"Model","category":"model","value":"gpt-6-sol","choices":[{"value":"gpt-6-sol","label":"GPT-6 Sol"}]}]},
+      {"id":"pi","usable":true,"lifecycle":null,"displayName":"Pi"},
+      {"id":"opencode","usable":true,"lifecycle":null,"displayName":"OpenCode"}
+    ]}
+    """
+    let barRaw = """
+    [
+      {"agent_id":"claude_code","display_name":"Claude Code","enabled":true,"retired":false,"position":0,"lifecycle":"ready","active_operation":null},
+      {"agent_id":"codex","display_name":"Codex","enabled":true,"retired":false,"position":1,"lifecycle":"ready","active_operation":null},
+      {"agent_id":"pi","display_name":"Pi","enabled":true,"retired":false,"position":2,"lifecycle":"uninstalled","active_operation":null},
+      {"agent_id":"opencode","display_name":"OpenCode","enabled":true,"retired":false,"position":3,"lifecycle":"uninstalled","active_operation":null}
+    ]
+    """
+    let catalog = try JSONDecoder().decode(JSONValue.self, from: Data(catalogRaw.utf8))
+    let bar = try JSONDecoder().decode(JSONValue.self, from: Data(barRaw.utf8))
+
+    let withBar = AgentCatalogParser.agents(from: catalog, managementBar: bar)
+    #expect(withBar.filter(\.usable).map(\.id) == ["claude_code", "codex"])
+
+    let fallbackOnly = AgentCatalogParser.agents(from: catalog, managementBar: nil)
+    #expect(fallbackOnly.filter(\.usable).map(\.id) == ["claude_code", "codex"])
+}
+
 @Test func liveControlsSnapshotYieldsModesAndOptions() throws {
     let raw = """
     {"modes":[{"id":"ro","label":"Read-only"}],"current_mode":"ro","config_options":[

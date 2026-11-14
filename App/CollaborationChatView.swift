@@ -347,9 +347,7 @@ struct CollaborationChatView: View {
     // MARK: - Composer Bar
 
     private var composerBar: some View {
-        VStack(spacing: 6) {
-            Divider()
-
+        VStack(spacing: 8) {
             if let reply = replyingTo {
                 HStack(spacing: 8) {
                     Image(systemName: "arrowshape.turn.up.left.fill")
@@ -367,8 +365,8 @@ struct CollaborationChatView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.top, 4)
+                .padding(.horizontal, 18)
+                .padding(.top, 2)
             }
 
             if item.isGroup && !agentMembers.isEmpty {
@@ -383,7 +381,7 @@ struct CollaborationChatView: View {
                             )
                         }
                     }
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 16)
                 }
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -392,10 +390,10 @@ struct CollaborationChatView: View {
                 Text(errorMessage)
                     .font(.system(size: 11))
                     .foregroundStyle(.red)
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 16)
             }
 
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 6) {
                 if item.isGroup {
                     Menu {
                         ForEach(Self.delayOptions, id: \.seconds) { option in
@@ -415,7 +413,7 @@ struct CollaborationChatView: View {
                         Image(systemName: delaySeconds > 0 ? "clock.badge.checkmark.fill" : "clock")
                             .font(.system(size: 17))
                             .foregroundStyle(delaySeconds > 0 ? Color.orange : Color.secondary)
-                            .frame(width: 32, height: 34)
+                            .frame(width: 34, height: 36)
                     }
                     .accessibilityLabel("定时发送")
                 }
@@ -426,28 +424,43 @@ struct CollaborationChatView: View {
                     axis: .vertical
                 )
                 .lineLimit(1...5)
-                .font(.system(size: 14))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Color(.secondarySystemGroupedBackground))
-                )
+                .font(.system(size: 15.5))
+                .padding(.leading, item.isGroup ? 4 : 10)
+                .padding(.vertical, 7)
+                .frame(minHeight: 36)
 
                 Button {
                     sendMessage()
                 } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 30))
-                        .foregroundStyle(canSend ? Color.blue : Color.secondary.opacity(0.4))
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(canSend ? Color(.systemBackground) : Color.primary.opacity(0.36))
+                        .frame(width: 36, height: 36)
+                        .background(
+                            Circle()
+                                .fill(canSend ? Color.primary : Color.primary.opacity(0.08))
+                        )
+                        .animation(.easeOut(duration: 0.18), value: canSend)
                 }
+                .buttonStyle(.plain)
                 .disabled(!canSend)
                 .accessibilityLabel("发送")
             }
-            .padding(.horizontal, 12)
+            .padding(.leading, 8)
+            .padding(.trailing, 8)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+                    .shadow(color: .black.opacity(0.08), radius: 14, x: 0, y: 4)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.09), lineWidth: 0.75)
+            )
+            .padding(.horizontal, 14)
             .padding(.bottom, 8)
         }
-        .background(Color(.systemBackground))
     }
 
     private func mentionChip(name: String, label: String, avatar: CollabBotAvatarConfig?) -> some View {

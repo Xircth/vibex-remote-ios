@@ -1,54 +1,58 @@
 import CompanionCore
 import SwiftUI
+import UIKit
 
-private enum SidebarSectionTab: String, CaseIterable, Identifiable {
-    case conversations = "最近对话"
-    case files = "项目文件"
+enum ConversationsRoute: Hashable {
+    case newThread
+    case conversation(ConversationListItem)
+}
+
+private enum SessionListOrganization: String, CaseIterable, Identifiable {
+    case statusGrouped = "状态分组"
+    case workspaceGrouped = "工作区视图"
     var id: String { rawValue }
 }
 
-private struct StarterSuggestion: Identifiable {
-    let id: String
-    let label: String
-    let prompt: String
-}
-
-/// Root of the "对话" tab:
-/// - Main canvas is calm and focused: either the minimal AI Chat Landing view (`activeConversation == nil`)
-///   or the active conversation (`ConversationDetailView`).
-/// - Slide-out Sidebar Drawer houses Recent Conversations and Project Files in one dedicated place.
+/// Root of the "会话" tab:
+/// - Level 1: Session List with global project switcher, `状态分组 / 工作区视图` toggle,
+///   expanded active groups (`进行中 / 待检查 / 待开始`), and a collapsible `已完成` shelf (collapsed by default).
+/// - Level 2 (`ConversationsRoute.newThread`): Focused `新建会话` screen triggered by the centered `+` button
+///   in the Level-1 floating capsule dock, with top-right `[ ⑂ | 📁 ]` capsule, lightweight project/host/branch
+///   breadcrumbs above the unified floating capsule composer, and zero bottom tab bar interference.
+/// - Level 2 (`ConversationsRoute.conversation`): `ConversationDetailView` with the bottom capsule dock hidden.
 struct ConversationsView: View {
     let client: HostClient
-    var onChromeHiddenChange: ((Bool) -> Void)? = nil
-    var onLaunchRevealedChange: ((Bool) -> Void)? = nil
-    var onSelectTab: ((AppTab) -> Void)? = nil
+    @Binding var selection: AppTab
+
+    @Environment(ServerStore.self) private var servers
+    @Environment(WorkspaceNavigationStore.self) private var navStore
     @Environment(CompanionAttentionCenter.self) private var attentionCenter: CompanionAttentionCenter?
+    @Environment(DesktopConnectFlow.self) private var connectFlow
 
-    @State private var list = RemoteList<ConversationListItem>()
-    @State private var projects: [ProjectSummary]?
+    @State private var path: [ConversationsRoute] = []
+    @State private var projects: [ProjectSummary] = []
+    @State private var sessions: [KanbanSessionSummary] = []
+    @State private var recentConversations: [ConversationListItem] = []
     @State private var agents: [CatalogAgent] = []
-
-    // Launch logo -> Landing logo morph & radial bloom state
-    @State private var launchLogoEntered = false
-    @State private var isLaunchRevealed = false
-
-    // Active conversation shown in the main canvas (`nil` = New Chat Landing view)
-    @State private var activeConversation: ConversationListItem?
-    @State private var didSyncInitialDesktopConversation = false
-    @State private var userRequestedNewChatLanding = false
-
-    // Sidebar state
-    @State private var isSidebarOpen = false
-    @State private var sidebarTab: SidebarSectionTab = .conversations
-    @State private var sidebarSearchQuery = ""
-    @State private var expandedFileProjectIDs: Set<String> = []
-    @State private var projectEntriesByWorkspace: [String: [WorkspaceEntry]] = [:]
-    @State private var loadingWorkspaceIDs: Set<String> = []
-    @State private var removedConversationIDs: Set<String> = []
+    @State private var workspacesByProject: [String: [KanbanWorkspaceRecord]] = [:]
+    @State private var isLoading = true
+    @State private var loadErrorMessage: String?
     @State private var actionErrorMessage: String?
 
-    // Landing page configuration state
-    @State private var selectedProjectID: String?
+    // Level-1 Session List state
+    @State private var organization: SessionListOrganization = .statusGrouped
+    @State private var searchQuery = ""
+    @State private var isCompletedShelfExpanded = false
+    @State private var removedSessionIDs: Set<String> = []
+    @AppStorage("vibex.manuallyCompletedSessionIDs") private var manuallyCompletedRaw = ""
+    @State private var renamingSession: KanbanSessionSummary?
+    @State private var renameDraft = ""
+    @State private var deletingSession: KanbanSessionSummary?
+
+    // Level-2 New Thread configuration state
+    @State private var newThreadProjectID: String?
+    @State private var newThreadWorkspaceID: String?
+    @State private var newThreadDiffCount: Int = 0
     @State private var selectedAgentID: String?
     @State private var selectedModelChoiceID: String?
     @State private var customModelName: String?
@@ -58,184 +62,272 @@ struct ConversationsView: View {
     @State private var draft = ""
     @State private var composerMenu: ComposerMenu?
     @State private var isCreatingAndSending = false
-    @State private var showProjectPickerSheet = false
+    @State private var pendingInitialPrompts: [String: PendingInitialPrompt] = [:]
+
+    // Shared Workspace Sheets (`项目文件` & `代码差异` & `项目选择`)
+    @State private var showNewThreadProjectSheet = false
     @State private var activeFileBrowserWorkspace: WorkspaceSheetTarget?
     @State private var activeDiffWorkspace: WorkspaceSheetTarget?
-    @State private var previewFileTarget: FilePreviewSheetTarget?
 
-    private let suggestions: [StarterSuggestion] = [
-        StarterSuggestion(
-            id: "arch",
-            label: "梳理项目架构",
-            prompt: "梳理当前项目的整体架构、目录结构与核心模块职责"
-        ),
-        StarterSuggestion(
-            id: "bug",
-            label: "排查近期改动",
-            prompt: "检查当前工作区最近的代码改动，排查潜在问题并给出修复方案"
-        ),
-        StarterSuggestion(
-            id: "test",
-            label: "补充单元测试",
-            prompt: "为当前工作区最近修改的核心逻辑补充单元测试并运行验证"
-        ),
-    ]
-
-    private var isConnected: Bool {
-        list.errorMessage == nil && list.items != nil
+    private var selectedFilterProject: ProjectSummary? {
+        guard let pid = navStore.selectedProjectID else { return nil }
+        return projects.first { $0.id.lowercased() == pid.lowercased() }
     }
 
-    private var shouldHideBottomChrome: Bool {
-        isSidebarOpen || activeConversation != nil || composerMenu != nil
+    // Merge KanbanSessionSummary with any recent conversations so no session is ever missed
+    private var mergedSessions: [KanbanSessionSummary] {
+        var byID: [String: KanbanSessionSummary] = [:]
+        for s in sessions where !s.isArchived && !removedSessionIDs.contains(s.id) {
+            byID[s.id] = s
+        }
+        for c in recentConversations where !removedSessionIDs.contains(c.id) {
+            if byID[c.id] == nil {
+                let converted = KanbanSessionSummary(fromConversation: c)
+                if !converted.isArchived {
+                    byID[c.id] = converted
+                }
+            }
+        }
+        let allowedWorkspaces: Set<String>? = {
+            guard let proj = selectedFilterProject else { return nil }
+            return Set(proj.workspaceIds)
+        }()
+        let filtered = byID.values.filter { item in
+            if let allowedWorkspaces, !allowedWorkspaces.contains(item.workspaceId) {
+                return false
+            }
+            let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !q.isEmpty else { return true }
+            let titleMatch = item.resolvedTitle.lowercased().contains(q)
+            let branchMatch = item.workspaceDisplayLabel.lowercased().contains(q)
+            let agentMatch = item.agentDisplayName.lowercased().contains(q)
+            let modelMatch = (item.model ?? "").lowercased().contains(q)
+            let projMatch = (projectName(forWorkspace: item.workspaceId) ?? "").lowercased().contains(q)
+            return titleMatch || branchMatch || agentMatch || modelMatch || projMatch
+        }
+        return filtered.sorted { lhs, rhs in
+            if lhs.isPinned != rhs.isPinned {
+                return lhs.isPinned && !rhs.isPinned
+            }
+            return (lhs.updatedDate ?? .distantPast) > (rhs.updatedDate ?? .distantPast)
+        }
     }
 
-    private var visibleConversations: [ConversationListItem] {
-        (list.items ?? []).filter { !removedConversationIDs.contains($0.id) }
+    private func projectName(forWorkspace workspaceID: String) -> String? {
+        projects.first { $0.workspaceIds.contains(workspaceID) }?.displayName
     }
 
-    private var groups: [ProjectGroup] {
-        ProjectGroup.make(conversations: visibleConversations, projects: projects ?? [])
+    private var manuallyCompletedIDs: Set<String> {
+        Set(
+            manuallyCompletedRaw
+                .split(separator: "|")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
     }
 
-    private var currentGroup: ProjectGroup? {
-        if let id = selectedProjectID, let match = groups.first(where: { $0.id == id }) {
+    private func setManuallyCompleted(_ id: String, completed: Bool) {
+        var next = manuallyCompletedIDs
+        if completed {
+            next.insert(id)
+        } else {
+            next.remove(id)
+        }
+        // Cap stored set to avoid unbounded growth
+        let trimmed = Array(next.sorted().suffix(200))
+        manuallyCompletedRaw = trimmed.joined(separator: "|")
+    }
+
+    /// In VibeX's backend state machine (`workbench_status.rs`), `status == .done` means
+    /// "latest finished turn has been viewed", NOT "conversation archived/finished forever".
+    /// Keep conversations active within the last 24h visible in `近期对话` unless the user
+    /// explicitly marked them `已完成`.
+    private func isRecentlyActiveReadSession(_ session: KanbanSessionSummary) -> Bool {
+        guard session.status == .done, !session.isRunning else { return false }
+        guard !manuallyCompletedIDs.contains(session.id) else { return false }
+        guard let date = session.updatedDate else { return false }
+        return Date().timeIntervalSince(date) <= 24 * 3600
+    }
+
+    // MARK: - New Thread Resolved Project / Workspace / Agent
+
+    private var effectiveNewThreadProject: ProjectSummary? {
+        if let pid = newThreadProjectID ?? navStore.selectedProjectID,
+           let match = projects.first(where: { $0.id.lowercased() == pid.lowercased() })
+        {
             return match
         }
-        if let gitGroup = groups.first(where: { !$0.isHome && $0.id != "other" && $0.isGit }) {
-            return gitGroup
+        if let gitProj = projects.first(where: { !$0.isHome && $0.isGit }) {
+            return gitProj
         }
-        if let nonHome = groups.first(where: { !$0.isHome && $0.id != "other" }) {
+        if let nonHome = projects.first(where: { !$0.isHome }) {
             return nonHome
         }
-        return groups.first
+        return projects.first
     }
 
-    private var currentWorkspaceID: String? {
-        guard let group = currentGroup else {
-            return visibleConversations.first?.workspace_id
+    private var newThreadWorkspaces: [KanbanWorkspaceRecord] {
+        guard let proj = effectiveNewThreadProject else { return [] }
+        return (workspacesByProject[proj.id] ?? []).filter { !$0.archived }
+    }
+
+    private var effectiveNewThreadWorkspaceRecord: KanbanWorkspaceRecord? {
+        let list = newThreadWorkspaces
+        if let wid = newThreadWorkspaceID, let match = list.first(where: { $0.id == wid }) {
+            return match
         }
-        return workspaceID(for: group)
+        return list.first
     }
 
-    private func workspaceID(for group: ProjectGroup) -> String? {
-        group.conversations.first?.workspace_id
-            ?? group.workspaceIds.first
-            ?? projects?.first(where: { $0.id == group.id })?.workspaceIds.first
+    private var effectiveNewThreadWorkspaceID: String? {
+        if let rec = effectiveNewThreadWorkspaceRecord {
+            return rec.id
+        }
+        if let wid = newThreadWorkspaceID,
+           let proj = effectiveNewThreadProject,
+           proj.workspaceIds.contains(wid)
+        {
+            return wid
+        }
+        return effectiveNewThreadProject?.workspaceIds.first
+            ?? recentConversations.first?.workspace_id
+    }
+
+    private var effectiveNewThreadBranchLabel: String {
+        if let rec = effectiveNewThreadWorkspaceRecord {
+            return rec.displayLabel
+        }
+        if effectiveNewThreadProject?.isGit == true {
+            return "main"
+        }
+        return "默认目录"
     }
 
     private var usableAgents: [CatalogAgent] {
-        let usable = agents.filter(\.usable)
-        return usable.isEmpty ? agents : usable
+        agents.filter(\.usable)
     }
 
     private var currentAgent: CatalogAgent? {
         if let id = selectedAgentID, let match = usableAgents.first(where: { $0.id == id }) {
             return match
         }
-        if let recentAgentID = currentGroup?.conversations.first?.agent_id ?? visibleConversations.first?.agent_id,
-           let match = usableAgents.first(where: { $0.id == recentAgentID }) {
+        if let recentAgentID = mergedSessions.first?.effectiveAgentKey ?? recentConversations.first?.agent_id,
+           let match = usableAgents.first(where: { $0.id == recentAgentID })
+        {
             return match
         }
         return usableAgents.first
     }
 
+    // MARK: - Body
+
     var body: some View {
-        ZStack(alignment: .leading) {
-            Group {
-                if let activeConversation {
-                    NavigationStack {
+        NavigationStack(path: $path) {
+            sessionListRootView
+                .navigationTitle("会话")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        projectSelectorMenu
+                    }
+                    ToolbarItem(placement: .principal) {
+                        Text("会话")
+                            .font(.headline.weight(.semibold))
+                    }
+                }
+                .navigationDestination(for: ConversationsRoute.self) { route in
+                    switch route {
+                    case .newThread:
+                        newThreadScreen
+                    case .conversation(let item):
                         ConversationDetailView(
                             client: client,
-                            conversation: activeConversation,
-                            onToggleSidebar: {
-                                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                                    isSidebarOpen.toggle()
+                            conversation: item,
+                            initialPrompt: pendingInitialPrompts[item.id],
+                            onBack: {
+                                pendingInitialPrompts.removeValue(forKey: item.id)
+                                if !path.isEmpty {
+                                    path.removeLast()
                                 }
                             },
-                            onReturnToLanding: {
-                                withAnimation(.smooth(duration: 0.2)) {
-                                    self.userRequestedNewChatLanding = true
-                                    self.activeConversation = nil
-                                }
+                            onMessageSent: { sentText in
+                                markLocalSessionRunning(conversation: item, promptText: sentText)
+                            },
+                            onTurnFinishedWhileViewing: {
+                                markLocalSessionViewedNow(sessionID: item.id)
                             }
                         )
-                        .id(activeConversation.id)
+                        .id(item.id)
                     }
-                } else {
-                    landingWorkspaceView
                 }
-            }
-            .disabled(isSidebarOpen)
-
-            if isSidebarOpen {
-                Color.black.opacity(0.36)
-                    .ignoresSafeArea()
-                    .onTapGesture {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                            isSidebarOpen = false
-                            dismissKeyboard()
-                        }
-                    }
-                    .transition(.opacity)
-                    .zIndex(1)
-
-                sidebarDrawer
-                    .transition(.move(edge: .leading))
-                    .zIndex(2)
+        }
+        .onChange(of: path.count, initial: true) { oldCount, count in
+            navStore.conversationsDepth = count
+            if count == 0 && oldCount > 0 {
+                Task { await reload() }
             }
         }
-        .gesture(
-            DragGesture(minimumDistance: 24, coordinateSpace: .local)
-                .onEnded { value in
-                    if !isSidebarOpen && value.startLocation.x < 32 && value.translation.width > 64 {
-                        dismissKeyboard()
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                            isSidebarOpen = true
-                        }
-                    } else if isSidebarOpen && value.translation.width < -60 {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                            isSidebarOpen = false
-                        }
-                    }
-                }
-        )
+        .onChange(of: navStore.newThreadTrigger) { _, _ in
+            newThreadProjectID = navStore.selectedProjectID ?? effectiveNewThreadProject?.id
+            newThreadWorkspaceID = nil
+            actionErrorMessage = nil
+            if path.last != .newThread {
+                path = [.newThread]
+            }
+            if let proj = effectiveNewThreadProject {
+                Task { await loadWorkspacesAndDiffForNewThread(projectID: proj.id) }
+            }
+        }
         .sheet(item: $activeFileBrowserWorkspace) { target in
             FileBrowserView(client: client, workspaceID: target.workspaceID)
         }
         .sheet(item: $activeDiffWorkspace) { target in
             DiffListView(client: client, workspaceID: target.workspaceID)
         }
-        .sheet(item: $previewFileTarget) { target in
-            NavigationStack {
-                FileContentView(client: client, workspaceID: target.workspaceID, path: target.path)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("完成") { previewFileTarget = nil }
-                        }
-                    }
+        .sheet(isPresented: $showNewThreadProjectSheet) {
+            newThreadProjectPickerSheet
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+        .alert(
+            "重命名会话",
+            isPresented: Binding(
+                get: { renamingSession != nil },
+                set: { if !$0 { renamingSession = nil } }
+            )
+        ) {
+            TextField("会话名称", text: $renameDraft)
+            Button("取消", role: .cancel) { renamingSession = nil }
+            Button("保存") {
+                if let target = renamingSession {
+                    performRename(target, newName: renameDraft)
+                }
+                renamingSession = nil
             }
         }
-        .sheet(isPresented: $showProjectPickerSheet) {
-            projectPickerSheet
-                .presentationDetents([.medium])
-                .presentationDragIndicator(.visible)
+        .alert(
+            "删除会话",
+            isPresented: Binding(
+                get: { deletingSession != nil },
+                set: { if !$0 { deletingSession = nil } }
+            ),
+            presenting: deletingSession
+        ) { target in
+            Button("取消", role: .cancel) { deletingSession = nil }
+            Button("删除", role: .destructive) {
+                performDelete(target)
+                deletingSession = nil
+            }
+        } message: { target in
+            Text("确定删除会话“\(target.resolvedTitle)”吗？")
         }
         .onAppear {
             consumePendingNavigationIfNeeded()
-            onChromeHiddenChange?(shouldHideBottomChrome)
-            if !launchLogoEntered {
-                withAnimation(.easeOut(duration: 0.36)) {
-                    launchLogoEntered = true
-                }
-            }
-        }
-        .onChange(of: shouldHideBottomChrome) { _, hidden in
-            onChromeHiddenChange?(hidden)
         }
         .onChange(of: actionErrorMessage) { _, msg in
             guard msg != nil else { return }
             Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(3200))
+                try? await Task.sleep(for: .milliseconds(3400))
                 if !Task.isCancelled {
                     withAnimation(.easeOut(duration: 0.2)) {
                         actionErrorMessage = nil
@@ -246,635 +338,813 @@ struct ConversationsView: View {
         .onChange(of: attentionCenter?.pendingNavigationConversation) { _, _ in
             consumePendingNavigationIfNeeded()
         }
-        .onChange(of: attentionCenter?.latestConversations) { _, updated in
-            guard let updated, !updated.isEmpty else { return }
-            syncWithFetchedConversations(updated)
-        }
         .onChange(of: attentionCenter?.latestNewlyCreatedConversation) { _, newConv in
-            guard let newConv else { return }
+            guard newConv != nil else { return }
             Task { await reload() }
-            if activeConversation == nil && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                userRequestedNewChatLanding = false
-                withAnimation(.smooth(duration: 0.22)) {
-                    activeConversation = newConv
-                }
-            }
-        }
-        .task {
-            guard !isLaunchRevealed else { return }
-            try? await Task.sleep(for: .milliseconds(620))
-            guard !Task.isCancelled else { return }
-            withAnimation(.spring(response: 1.08, dampingFraction: 0.86, blendDuration: 0.2)) {
-                isLaunchRevealed = true
-            }
-            onLaunchRevealedChange?(true)
         }
         .task {
             while !Task.isCancelled {
                 await reload()
-                try? await Task.sleep(for: .seconds(list.errorMessage == nil ? 25 : 4))
+                let hasRunning = sessions.contains { $0.isRunning || $0.status == .inprogress }
+                let delaySeconds: Int = if loadErrorMessage != nil {
+                    4
+                } else if hasRunning && path.isEmpty {
+                    3
+                } else {
+                    12
+                }
+                try? await Task.sleep(for: .seconds(delaySeconds))
             }
         }
     }
 
-    // MARK: - Minimal, Focused AI Chat Landing View
+    // MARK: - Level-1 Top Bar Controls
 
-    private var landingWorkspaceView: some View {
-        VStack(spacing: 0) {
-            landingTopBar
-                .opacity(isLaunchRevealed ? 1 : 0)
-                .scaleEffect(isLaunchRevealed ? 1 : 0.82)
-                .offset(y: isLaunchRevealed ? 0 : 145)
-                .blur(radius: isLaunchRevealed ? 0 : 5)
-
-            Spacer(minLength: 24)
-
-            // Single focal point: Persistent Logo (morphs from center launch logo -> landing logo)
-            // + Greeting + Quiet Project Pill radiating outward from the logo
-            VStack(spacing: 16) {
-                Image("vibex_logo")
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .frame(width: 54, height: 54)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .shadow(
-                        color: .black.opacity(isLaunchRevealed ? 0.08 : 0.14),
-                        radius: isLaunchRevealed ? 10 : 18,
-                        x: 0,
-                        y: isLaunchRevealed ? 4 : 8
-                    )
-                    .scaleEffect(isLaunchRevealed ? 1.0 : (launchLogoEntered ? 1.52 : 1.28))
-                    .offset(y: isLaunchRevealed ? 0 : 42)
-                    .zIndex(2)
-
-                VStack(spacing: 14) {
-                    Text("有什么可以帮你？")
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(.primary)
-
-                    if let group = currentGroup {
-                        projectContextPill(group: group)
-                    } else if let errorMessage = list.errorMessage {
-                        LoadFailureView(message: errorMessage) {
-                            Task { await reload() }
-                        }
-                        .padding(.horizontal, 24)
-                    }
-
-                    if let actionErrorMessage {
-                        Text(actionErrorMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 24)
-                    }
-                }
-                .opacity(isLaunchRevealed ? 1 : 0)
-                .scaleEffect(isLaunchRevealed ? 1 : 0.78)
-                .offset(y: isLaunchRevealed ? 0 : -36)
-                .blur(radius: isLaunchRevealed ? 0 : 5)
-            }
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if composerMenu != nil {
-                    composerMenu = nil
-                }
-                dismissKeyboard()
-            }
-
-            Spacer(minLength: 24)
-
-            // Quiet starter chips: only shown when input is empty and menu is closed
-            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && composerMenu == nil {
-                starterChipsStrip
-                    .padding(.bottom, 10)
-                    .opacity(isLaunchRevealed ? 1 : 0)
-                    .scaleEffect(isLaunchRevealed ? 1 : 0.82)
-                    .offset(y: isLaunchRevealed ? 0 : -150)
-                    .blur(radius: isLaunchRevealed ? 0 : 5)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
-
-            landingPromptBar
-                .opacity(isLaunchRevealed ? 1 : 0)
-                .scaleEffect(isLaunchRevealed ? 1 : 0.85)
-                .offset(y: isLaunchRevealed ? 0 : -195)
-                .blur(radius: isLaunchRevealed ? 0 : 6)
-        }
-        .allowsHitTesting(isLaunchRevealed)
-        .background(Color(.systemGroupedBackground).ignoresSafeArea())
-        .animation(.smooth(duration: 0.18), value: draft.isEmpty)
-    }
-
-    private var landingTopBar: some View {
-        HStack {
+    private var projectSelectorMenu: some View {
+        Menu {
             Button {
-                dismissKeyboard()
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                    isSidebarOpen.toggle()
-                }
+                navStore.selectedProjectID = nil
+                Task { await reload() }
             } label: {
-                Image(systemName: "sidebar.left")
-                    .font(.system(size: 16.5, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .frame(width: 36, height: 36)
-                    .background(
-                        Circle()
-                            .fill(Color(.secondarySystemGroupedBackground))
-                    )
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("打开侧边栏")
-
-            Spacer()
-
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(isConnected ? Color.green : Color.orange)
-                    .frame(width: 6, height: 6)
-                Text(isConnected ? "已连接" : "连接中")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            // Symmetric spacer to keep the status centered without adding extra buttons
-            Color.clear
-                .frame(width: 36, height: 36)
-        }
-        .padding(.horizontal, 14)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
-    }
-
-    private func projectContextPill(group: ProjectGroup) -> some View {
-        Button {
-            showProjectPickerSheet = true
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: group.isHome ? "house" : "folder")
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-
-                Text(group.name)
-                    .font(.system(size: 13.5, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-
-                if group.isGit {
-                    Text("·")
-                        .foregroundStyle(.tertiary)
-                    HStack(spacing: 2.5) {
-                        Image(systemName: "arrow.triangle.branch")
-                            .font(.system(size: 10, weight: .medium))
-                        Text("main")
-                            .font(.system(size: 12.5))
+                HStack {
+                    Label("全部项目", systemImage: "square.stack.3d.up")
+                    if navStore.selectedProjectID == nil {
+                        Image(systemName: "checkmark")
                     }
-                    .foregroundStyle(.secondary)
                 }
-
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                    .padding(.leading, 2)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(Color(.secondarySystemGroupedBackground))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.6)
-            )
-        }
-        .buttonStyle(.plain)
-    }
 
-    private var starterChipsStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(suggestions) { item in
+            if !projects.isEmpty {
+                Divider()
+                ForEach(projects) { project in
                     Button {
-                        withAnimation(.smooth(duration: 0.16)) {
-                            draft = item.prompt
-                        }
+                        navStore.selectedProjectID = project.id
+                        Task { await reload() }
                     } label: {
-                        Text(item.label)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 7.5)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(Color(.secondarySystemGroupedBackground))
+                        HStack {
+                            Label(
+                                project.displayName,
+                                systemImage: project.isHome ? "house" : (project.isGit ? "arrow.triangle.branch" : "folder")
                             )
-                            .overlay(
-                                Capsule(style: .continuous)
-                                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.6)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 14)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    // MARK: - Slide-Out Sidebar Drawer (Recent Conversations + Project Files)
-
-    private var sidebarDrawer: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Sidebar top bar: segmented switcher + New Chat button
-            HStack(spacing: 8) {
-                HStack(spacing: 3) {
-                    ForEach(SidebarSectionTab.allCases) { tab in
-                        let selected = sidebarTab == tab
-                        Button {
-                            withAnimation(.smooth(duration: 0.18)) {
-                                sidebarTab = tab
+                            if navStore.selectedProjectID?.lowercased() == project.id.lowercased() {
+                                Image(systemName: "checkmark")
                             }
-                        } label: {
-                            Text(tab.rawValue)
-                                .font(.system(size: 13, weight: selected ? .semibold : .medium))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(
-                                    Capsule(style: .continuous)
-                                        .fill(selected ? Color(.systemBackground) : Color.clear)
-                                        .shadow(color: .black.opacity(selected ? 0.06 : 0), radius: 2, x: 0, y: 1)
-                                )
-                                .foregroundStyle(selected ? .primary : .secondary)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
-                .padding(3)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Color(.tertiarySystemFill))
-                )
-
-                Spacer()
-
-                Button {
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
-                        userRequestedNewChatLanding = true
-                        activeConversation = nil
-                        isSidebarOpen = false
-                    }
-                } label: {
-                    Image(systemName: "square.and.pencil")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 32, height: 32)
-                        .background(
-                            Circle()
-                                .fill(Color(.tertiarySystemFill))
-                        )
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("新对话")
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 12)
-            .padding(.bottom, 10)
-
-            // Search box
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                TextField(
-                    sidebarTab == .conversations ? "搜索对话…" : "搜索项目…",
-                    text: $sidebarSearchQuery
+        } label: {
+            HStack(spacing: 5) {
+                Image(
+                    systemName: selectedFilterProject == nil
+                        ? "square.stack.3d.up.fill"
+                        : (selectedFilterProject?.isGit == true ? "arrow.triangle.branch" : "folder.fill")
                 )
-                .font(.system(size: 13.5))
-                .textFieldStyle(.plain)
-                if !sidebarSearchQuery.isEmpty {
-                    Button {
-                        sidebarSearchQuery = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 13))
+                .font(.caption.weight(.semibold))
+                Text(selectedFilterProject?.displayName ?? "全部项目")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .foregroundStyle(.primary)
+        }
+    }
+
+    // MARK: - Level-1 Session List Root View
+
+    private var sessionListRootView: some View {
+        VStack(spacing: 0) {
+            if let actionErrorMessage, path.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red)
+                        .font(.footnote)
+                    Text(actionErrorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color(.secondarySystemGroupedBackground))
+            } else if loadErrorMessage != nil, (!sessions.isEmpty || !recentConversations.isEmpty) {
+                Button {
+                    connectFlow.presentPicker(servers: servers)
+                } label: {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 6.5, height: 6.5)
+                        Text("连接已断开，点击重连或切换电脑")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
                             .foregroundStyle(.tertiary)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color(.secondarySystemGroupedBackground))
                 }
+                .buttonStyle(.plain)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7.5)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color(.tertiarySystemFill))
-            )
-            .padding(.horizontal, 14)
-            .padding(.bottom, 10)
 
-            Divider().opacity(0.45)
-
-            ScrollView {
-                switch sidebarTab {
-                case .conversations:
-                    sidebarConversationsContent
-                        .padding(.vertical, 10)
-                case .files:
-                    sidebarFilesContent
-                        .padding(.vertical, 10)
-                }
-            }
-            .refreshable {
-                await reload()
-            }
-        }
-        .frame(width: 304)
-        .frame(maxHeight: .infinity)
-        .background(
-            Color(.secondarySystemGroupedBackground)
-                .ignoresSafeArea()
-        )
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(Color.primary.opacity(0.07))
-                .frame(width: 0.5)
-                .ignoresSafeArea()
-        }
-        .shadow(color: .black.opacity(0.18), radius: 18, x: 5, y: 0)
-    }
-
-    private func sidebarQuickNavButton(
-        title: String,
-        icon: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            VStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 14.5, weight: .medium))
-                    .frame(height: 18)
-                Text(title)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(.tertiarySystemFill).opacity(0.65))
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    // MARK: Sidebar Tab 1: 最近对话
-
-    private var sidebarConversationsContent: some View {
-        let q = sidebarSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let nonEmptyGroups = groups.filter { !$0.conversations.isEmpty }
-
-        return VStack(alignment: .leading, spacing: 14) {
-            if nonEmptyGroups.isEmpty {
-                Text("暂无对话记录")
-                    .font(.system(size: 13))
+            if isLoading && sessions.isEmpty && recentConversations.isEmpty {
+                Spacer()
+                ProgressView("正在同步会话…")
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 32)
+                Spacer()
+            } else if let loadErrorMessage, sessions.isEmpty && recentConversations.isEmpty {
+                Spacer()
+                LoadFailureView(message: loadErrorMessage) {
+                    Task { await reload() }
+                }
+                Spacer()
             } else {
-                ForEach(nonEmptyGroups) { group in
-                    let filteredConvs = group.conversations.filter { item in
-                        guard !q.isEmpty else { return true }
-                        let title = (item.title ?? "未命名对话").lowercased()
-                        let model = (item.model ?? "").lowercased()
-                        return title.contains(q) || model.contains(q) || group.name.lowercased().contains(q)
-                    }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        searchAndModeHeader
 
-                    if !filteredConvs.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(group.name)
-                                .font(.system(size: 11.5, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 16)
-
-                            VStack(spacing: 2) {
-                                ForEach(filteredConvs) { item in
-                                    sidebarConversationRow(item)
-                                }
-                            }
-                            .padding(.horizontal, 8)
+                        switch organization {
+                        case .statusGrouped:
+                            statusGroupedContent
+                        case .workspaceGrouped:
+                            workspaceGroupedContent
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, WorkspaceNavigationStore.bottomDockClearance + 14)
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .refreshable {
+                    await reload()
+                }
+            }
+        }
+        .background(Color(.systemGroupedBackground).ignoresSafeArea())
+    }
+
+    private var searchAndModeHeader: some View {
+        VStack(spacing: 10) {
+            UnifiedSearchBar(
+                query: $searchQuery,
+                placeholder: "搜索会话、分支或模型…"
+            )
+
+            HStack {
+                Picker("视图模式", selection: $organization) {
+                    ForEach(SessionListOrganization.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Spacer(minLength: 10)
+
+                Text("\(mergedSessions.count) 个会话")
+                    .font(.system(size: 12, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Mode 1: Status Grouped (`状态分组` + Collapsible `已完成` Shelf)
+
+    @ViewBuilder
+    private var statusGroupedContent: some View {
+        let all = mergedSessions
+        let runningList = all.filter { $0.status == .inprogress || ($0.isRunning && $0.status != .inreview) }
+        let reviewList = all.filter { $0.status == .inreview && !runningList.contains($0) }
+        let recentReadList = all.filter { isRecentlyActiveReadSession($0) }
+        let todoList = all.filter { $0.status == .todo && !$0.isRunning }
+        let doneList = all.filter { $0.status == .done && !$0.isRunning && !isRecentlyActiveReadSession($0) }
+        let hasActive = !runningList.isEmpty || !reviewList.isEmpty || !recentReadList.isEmpty || !todoList.isEmpty
+        let isSearching = !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        if all.isEmpty {
+            emptySessionsCard
+        } else {
+            if !hasActive && !isSearching {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.green)
+                    Text("当前没有进行中或近期对话，点底部 + 新建会话")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color(.secondarySystemGroupedBackground))
+                )
+            }
+
+            if !runningList.isEmpty {
+                sessionSectionBlock(
+                    title: "进行中",
+                    tint: .orange,
+                    icon: "bolt.horizontal.circle.fill",
+                    items: runningList
+                )
+            }
+
+            if !reviewList.isEmpty {
+                sessionSectionBlock(
+                    title: "待检查",
+                    tint: .purple,
+                    icon: "eye.circle.fill",
+                    items: reviewList
+                )
+            }
+
+            if !recentReadList.isEmpty {
+                sessionSectionBlock(
+                    title: "近期对话",
+                    tint: .teal,
+                    icon: "bubble.left.and.bubble.right.fill",
+                    items: recentReadList
+                )
+            }
+
+            if !todoList.isEmpty {
+                sessionSectionBlock(
+                    title: "待开始",
+                    tint: .blue,
+                    icon: "circle.dotted",
+                    items: todoList
+                )
+            }
+
+            if !doneList.isEmpty {
+                completedShelfView(items: doneList, forceExpanded: isSearching)
+            }
+        }
+    }
+
+    private func completedShelfView(items: [KanbanSessionSummary], forceExpanded: Bool) -> some View {
+        let expanded = forceExpanded || isCompletedShelfExpanded
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                    isCompletedShelfExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11.5, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14)
+
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(.green.opacity(0.85))
+
+                    Text("已完成历史会话")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Text("\(items.count)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2.5)
+                        .background(Capsule().fill(Color(.tertiarySystemFill)))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color(.secondarySystemGroupedBackground))
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                sessionCardGroup(items: items)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+
+    // MARK: - Mode 2: Workspace Grouped (`工作区视图`)
+
+    @ViewBuilder
+    private var workspaceGroupedContent: some View {
+        let all = mergedSessions
+        if all.isEmpty {
+            emptySessionsCard
+        } else {
+            let grouped = Dictionary(grouping: all) { item -> String in
+                let proj = projectName(forWorkspace: item.workspaceId) ?? "其他项目"
+                let branch = item.workspaceDisplayLabel
+                return branch.isEmpty ? proj : "\(proj) · \(branch)"
+            }
+            let sortedKeys = grouped.keys.sorted { lhs, rhs in
+                let lDate = grouped[lhs]?.first?.updatedDate ?? .distantPast
+                let rDate = grouped[rhs]?.first?.updatedDate ?? .distantPast
+                return lDate > rDate
+            }
+
+            ForEach(sortedKeys, id: \.self) { headerKey in
+                if let items = grouped[headerKey], !items.isEmpty {
+                    sessionSectionBlock(
+                        title: headerKey,
+                        tint: .secondary,
+                        icon: "arrow.triangle.branch",
+                        items: items
+                    )
                 }
             }
         }
     }
 
-    private func sidebarConversationRow(_ item: ConversationListItem) -> some View {
-        let isCurrent = activeConversation?.id == item.id
-        return Button {
-            withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
-                userRequestedNewChatLanding = false
-                activeConversation = item
-                isSidebarOpen = false
-            }
-        } label: {
-            HStack(alignment: .center, spacing: 9) {
-                AgentIconView(agent: item.agent_id, size: 14)
-                    .frame(width: 24, height: 24)
+    private var emptySessionsCard: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 32))
+                .foregroundStyle(.tertiary)
 
-                Text(item.title ?? "未命名对话")
-                    .font(.system(size: 13.5, weight: isCurrent ? .semibold : .regular))
-                    .foregroundStyle(isCurrent ? Color.accentColor : Color.primary)
+            Text(searchQuery.isEmpty ? "暂无会话记录" : "没有找到匹配的会话")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.primary)
+
+            Text(searchQuery.isEmpty ? "点击底部胶囊栏中间的 + 发起新会话" : "请尝试更换搜索关键词或切换项目筛选")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 42)
+        .padding(.horizontal, 20)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+    }
+
+    private func sessionSectionBlock(
+        title: String,
+        tint: Color,
+        icon: String,
+        items: [KanbanSessionSummary]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(tint)
+                Text(title)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
+                Text("\(items.count)")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
+            .padding(.horizontal, 4)
 
-                Spacer(minLength: 4)
+            sessionCardGroup(items: items)
+        }
+    }
 
-                if let date = item.updatedAt {
-                    Text(relativeChinese(date))
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.tertiary)
-                        .layoutPriority(1)
+    private func sessionCardGroup(items: [KanbanSessionSummary]) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { idx, session in
+                sessionRowButton(session)
+                if idx < items.count - 1 {
+                    Divider()
+                        .padding(.leading, 48)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(isCurrent ? Color.accentColor.opacity(0.12) : Color.clear)
-            )
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+    }
+
+    private func sessionRowButton(_ session: KanbanSessionSummary) -> some View {
+        let projLabel = projectName(forWorkspace: session.workspaceId)
+        let branchLabel = session.workspaceDisplayLabel
+        return Button {
+            openSession(session)
+        } label: {
+            HStack(alignment: .center, spacing: 11) {
+                ZStack(alignment: .bottomTrailing) {
+                    AgentIconView(agent: session.effectiveAgentKey, size: 20)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(Color(.tertiarySystemFill))
+                        )
+
+                    if session.isRunning || session.status == .inprogress {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 8, height: 8)
+                            .overlay(Circle().stroke(Color(.secondarySystemGroupedBackground), lineWidth: 1.5))
+                            .offset(x: 2, y: 2)
+                    } else if session.status == .inreview {
+                        Circle()
+                            .fill(Color.purple)
+                            .frame(width: 8, height: 8)
+                            .overlay(Circle().stroke(Color(.secondarySystemGroupedBackground), lineWidth: 1.5))
+                            .offset(x: 2, y: 2)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 3.5) {
+                    HStack(spacing: 5) {
+                        if session.isPinned {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.orange)
+                        }
+                        Text(session.resolvedTitle)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    }
+
+                    HStack(spacing: 6) {
+                        if let projLabel, navStore.selectedProjectID == nil {
+                            Text(projLabel)
+                                .lineLimit(1)
+                        }
+                        if !branchLabel.isEmpty {
+                            HStack(spacing: 2) {
+                                Image(systemName: "arrow.triangle.branch")
+                                    .font(.system(size: 9.5))
+                                Text(branchLabel)
+                                    .lineLimit(1)
+                            }
+                        }
+                        if let model = session.model, !model.isEmpty {
+                            Text("· \(model)")
+                                .lineLimit(1)
+                        }
+                    }
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 6)
+
+                VStack(alignment: .trailing, spacing: 4) {
+                    if let date = session.updatedDate {
+                        Text(relativeChinese(date))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    if organization == .workspaceGrouped {
+                        statusBadge(for: session)
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .contextMenu {
+            Menu {
+                ForEach(KanbanSessionStatus.activeColumns) { targetStatus in
+                    let isCurrentSelection = session.status == targetStatus
+                        && !(targetStatus == .done && isRecentlyActiveReadSession(session))
+                    Button {
+                        performStatusChange(session, to: targetStatus)
+                    } label: {
+                        HStack {
+                            Text(targetStatus.title)
+                            if isCurrentSelection {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label("切换状态", systemImage: "flag")
+            }
+
             Button {
-                archiveSingleConversation(item)
+                performTogglePin(session)
             } label: {
-                Label("归档对话", systemImage: "archivebox")
+                Label(session.isPinned ? "取消置顶" : "置顶会话", systemImage: session.isPinned ? "pin.slash" : "pin")
             }
+
+            Button {
+                renameDraft = session.name ?? session.resolvedTitle
+                renamingSession = session
+            } label: {
+                Label("重命名", systemImage: "pencil")
+            }
+
+            Button {
+                performArchive(session)
+            } label: {
+                Label("归档会话", systemImage: "archivebox")
+            }
+
+            Divider()
+
             Button(role: .destructive) {
-                deleteSingleConversation(item)
+                deletingSession = session
             } label: {
-                Label("删除对话", systemImage: "trash")
+                Label("删除会话", systemImage: "trash")
             }
         }
     }
 
-    // MARK: Sidebar Tab 2: 项目文件
+    private func statusBadge(for session: KanbanSessionSummary) -> some View {
+        let (label, color): (String, Color) = {
+            if session.isRunning || session.status == .inprogress { return ("进行中", .orange) }
+            switch session.status {
+            case .inreview: return ("待检查", .purple)
+            case .todo: return ("待开始", .blue)
+            case .done:
+                if isRecentlyActiveReadSession(session) {
+                    return ("近期对话", .teal)
+                }
+                return ("已完成", .green)
+            case .archived: return ("已归档", .gray)
+            case .inprogress: return ("进行中", .orange)
+            }
+        }()
+        return Text(label)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(color.opacity(0.13)))
+    }
 
-    private var sidebarFilesContent: some View {
-        let q = sidebarSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let filteredGroups = groups.filter { group in
-            guard group.id != "other" else { return false }
-            guard !q.isEmpty else { return true }
-            return group.name.lowercased().contains(q) || group.rootPath.lowercased().contains(q)
-        }
+    // MARK: - Level-2 `新建会话` (`New Thread`) Screen
 
-        return VStack(alignment: .leading, spacing: 6) {
-            ForEach(filteredGroups) { group in
-                let ws = workspaceID(for: group)
-                let isExpanded = expandedFileProjectIDs.contains(group.id)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 8) {
-                        Button {
-                            guard let ws else { return }
-                            withAnimation(.smooth(duration: 0.18)) {
-                                if isExpanded {
-                                    expandedFileProjectIDs.remove(group.id)
-                                } else {
-                                    expandedFileProjectIDs.insert(group.id)
-                                    loadSidebarWorkspaceEntries(workspaceID: ws)
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                    .foregroundStyle(.tertiary)
-                                    .frame(width: 12)
+    private var newThreadScreen: some View {
+        VStack(spacing: 0) {
+            // Top Floating Bar (`< 新建会话` + `[ ⑂ | 📁 ]`)
+            HStack(spacing: 12) {
+                FloatingCircleBackButton {
+                    if !path.isEmpty {
+                        path.removeLast()
+                    }
+                }
 
-                                Image(systemName: "folder")
-                                    .font(.system(size: 13.5))
-                                    .foregroundStyle(.secondary)
+                Text("新建会话")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(.primary)
 
-                                Text(group.name)
-                                    .font(.system(size: 13.5, weight: .medium))
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(1)
+                Spacer()
 
-                                Spacer(minLength: 4)
-                            }
-                            .contentShape(Rectangle())
+                WorkspaceDualToolsCapsule(
+                    changeCount: newThreadDiffCount,
+                    isDisabled: effectiveNewThreadWorkspaceID == nil,
+                    onOpenChanges: {
+                        if let ws = effectiveNewThreadWorkspaceID {
+                            activeDiffWorkspace = WorkspaceSheetTarget(
+                                workspaceID: ws,
+                                title: effectiveNewThreadProject?.displayName ?? "代码差异"
+                            )
                         }
-                        .buttonStyle(.plain)
+                    },
+                    onOpenFiles: {
+                        if let ws = effectiveNewThreadWorkspaceID {
+                            activeFileBrowserWorkspace = WorkspaceSheetTarget(
+                                workspaceID: ws,
+                                title: effectiveNewThreadProject?.displayName ?? "项目文件"
+                            )
+                        }
+                    }
+                )
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 6)
+            .padding(.bottom, 8)
 
-                        if let ws {
+            // Calm middle canvas — tap anywhere to dismiss keyboard
+            Spacer(minLength: 20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    dismissKeyboard()
+                }
+
+            if let actionErrorMessage {
+                Text(actionErrorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 8)
+            }
+
+            // Lightweight bottom-aligned context breadcrumbs right above composer
+            newThreadContextBreadcrumbs
+                .padding(.horizontal, 18)
+                .padding(.bottom, 12)
+
+            // Unified Floating Capsule Composer
+            newThreadPromptBar
+        }
+        .background(Color(.systemGroupedBackground).ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
+        .task(id: effectiveNewThreadProject?.id) {
+            if let pid = effectiveNewThreadProject?.id {
+                await loadWorkspacesAndDiffForNewThread(projectID: pid)
+            }
+        }
+        .task(id: effectiveNewThreadWorkspaceID) {
+            if let wid = effectiveNewThreadWorkspaceID,
+               let diffs = try? await client.workspaceDiff(workspaceID: wid)
+            {
+                newThreadDiffCount = diffs.count
+            } else {
+                newThreadDiffCount = 0
+            }
+        }
+    }
+
+    private var newThreadContextBreadcrumbs: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            // Row 1: `📁 <project> ›`  +  `💻 <host> ›`
+            HStack(spacing: 14) {
+                Button {
+                    dismissKeyboard()
+                    showNewThreadProjectSheet = true
+                } label: {
+                    HStack(spacing: 5.5) {
+                        Image(systemName: effectiveNewThreadProject?.isHome == true ? "house" : "folder")
+                            .font(.system(size: 13.5, weight: .medium))
+                        Text(effectiveNewThreadProject?.displayName ?? "选择项目")
+                            .font(.system(size: 14, weight: .medium))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .opacity(0.65)
+                    }
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    dismissKeyboard()
+                    connectFlow.presentPicker(servers: servers)
+                } label: {
+                    HStack(spacing: 5.5) {
+                        Image(systemName: "laptopcomputer")
+                            .font(.system(size: 13.5, weight: .medium))
+                        Text(servers.activeProfile?.displayHost ?? "VibeX 桌面端")
+                            .font(.system(size: 14, weight: .medium))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .opacity(0.65)
+                    }
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 0)
+            }
+
+            // Row 2: `📁 当前检出`  +  `⑂ <branch / workspace> ›`
+            HStack(spacing: 14) {
+                HStack(spacing: 5.5) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 13.5, weight: .medium))
+                    Text(effectiveNewThreadWorkspaceRecord?.useWorktree == true ? "独立工作树" : "当前检出")
+                        .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(.secondary)
+
+                if newThreadWorkspaces.count > 1 {
+                    Menu {
+                        ForEach(newThreadWorkspaces) { ws in
                             Button {
-                                isSidebarOpen = false
-                                activeFileBrowserWorkspace = WorkspaceSheetTarget(
-                                    workspaceID: ws,
-                                    title: group.name
-                                )
+                                newThreadWorkspaceID = ws.id
                             } label: {
-                                Text("浏览")
-                                    .font(.system(size: 11.5, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3.5)
-                                    .background(
-                                        Capsule(style: .continuous)
-                                            .fill(Color(.tertiarySystemFill))
+                                HStack {
+                                    Label(
+                                        ws.displayLabel,
+                                        systemImage: ws.useWorktree ? "square.split.2x1" : "arrow.triangle.branch"
                                     )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-
-                    if isExpanded, let ws {
-                        if loadingWorkspaceIDs.contains(ws) {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text("读取中…")
-                                    .font(.system(size: 11.5))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.leading, 30)
-                            .padding(.vertical, 4)
-                        } else if let entries = projectEntriesByWorkspace[ws] {
-                            VStack(alignment: .leading, spacing: 1) {
-                                ForEach(entries.prefix(25), id: \.path) { entry in
-                                    Button {
-                                        isSidebarOpen = false
-                                        if entry.directory {
-                                            activeFileBrowserWorkspace = WorkspaceSheetTarget(
-                                                workspaceID: ws,
-                                                title: group.name
-                                            )
-                                        } else {
-                                            previewFileTarget = FilePreviewSheetTarget(
-                                                workspaceID: ws,
-                                                path: entry.path
-                                            )
-                                        }
-                                    } label: {
-                                        HStack(spacing: 7) {
-                                            Image(
-                                                systemName: entry.directory
-                                                    ? "folder"
-                                                    : FileGlyph.symbol(for: entry.name)
-                                            )
-                                            .font(.system(size: 11.5))
-                                            .foregroundStyle(.secondary)
-                                            .frame(width: 15)
-
-                                            Text(entry.name)
-                                                .font(.system(size: 12.5))
-                                                .foregroundStyle(.primary)
-                                                .lineLimit(1)
-
-                                            Spacer()
-                                        }
-                                        .padding(.leading, 28)
-                                        .padding(.trailing, 10)
-                                        .padding(.vertical, 5)
-                                        .contentShape(Rectangle())
+                                    if ws.id == effectiveNewThreadWorkspaceID {
+                                        Image(systemName: "checkmark")
                                     }
-                                    .buttonStyle(.plain)
                                 }
                             }
                         }
+                    } label: {
+                        HStack(spacing: 5.5) {
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.system(size: 13, weight: .medium))
+                            Text(effectiveNewThreadBranchLabel)
+                                .font(.system(size: 14, weight: .medium))
+                                .lineLimit(1)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .opacity(0.65)
+                        }
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
                     }
+                } else {
+                    HStack(spacing: 5.5) {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 13, weight: .medium))
+                        Text(effectiveNewThreadBranchLabel)
+                            .font(.system(size: 14, weight: .medium))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .opacity(0.45)
+                    }
+                    .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 8)
+
+                Spacer(minLength: 0)
             }
         }
     }
 
-    private func loadSidebarWorkspaceEntries(workspaceID: String) {
-        guard projectEntriesByWorkspace[workspaceID] == nil,
-              !loadingWorkspaceIDs.contains(workspaceID)
-        else { return }
-        loadingWorkspaceIDs.insert(workspaceID)
-        Task {
-            defer { loadingWorkspaceIDs.remove(workspaceID) }
-            if let tree = try? await client.workspaceTree(workspaceID: workspaceID, path: "") {
-                let sorted = tree.entries.sorted {
-                    if $0.directory != $1.directory { return $0.directory && !$1.directory }
-                    return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+    // MARK: - New Thread Project Picker Sheet
+
+    private var newThreadProjectPickerSheet: some View {
+        NavigationStack {
+            List {
+                ForEach(projects) { project in
+                    let isSelected = effectiveNewThreadProject?.id.lowercased() == project.id.lowercased()
+                    Button {
+                        newThreadProjectID = project.id
+                        newThreadWorkspaceID = nil
+                        showNewThreadProjectSheet = false
+                        Task { await loadWorkspacesAndDiffForNewThread(projectID: project.id) }
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: project.isHome ? "house" : (project.isGit ? "arrow.triangle.branch" : "folder"))
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 28)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(project.displayName)
+                                    .font(.system(size: 15, weight: isSelected ? .semibold : .regular))
+                                    .foregroundStyle(.primary)
+                                if !project.rootPath.isEmpty {
+                                    Text(project.rootPath)
+                                        .font(.system(size: 11.5))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                            }
+
+                            Spacer()
+
+                            if isSelected {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                        }
+                        .padding(.vertical, 3)
+                    }
+                    .buttonStyle(.plain)
                 }
-                projectEntriesByWorkspace[workspaceID] = sorted
+            }
+            .navigationTitle("选择项目")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { showNewThreadProjectSheet = false }
+                }
             }
         }
     }
 
-    // MARK: - Landing PromptBar Integration
+    // MARK: - New Thread PromptBar & Creation Logic
 
     private var savedCustomModels: [String] {
         savedCustomModelsRaw
@@ -894,13 +1164,16 @@ struct ConversationsView: View {
 
     private var landingAgentChoices: [PromptChoice] {
         let activeID = currentAgent?.id ?? "claude_code"
-        let list = usableAgents.isEmpty
-            ? [
+        let list: [CatalogAgent]
+        if !usableAgents.isEmpty {
+            list = usableAgents
+        } else if agents.isEmpty {
+            list = [
                 CatalogAgent(id: "claude_code", displayName: "Claude Code", usable: true, currentModeID: nil, modes: [], options: []),
-                CatalogAgent(id: "codex", displayName: "Codex", usable: true, currentModeID: nil, modes: [], options: []),
-                CatalogAgent(id: "antigravity", displayName: "Antigravity", usable: true, currentModeID: nil, modes: [], options: []),
             ]
-            : usableAgents
+        } else {
+            list = []
+        }
         return list.map { item in
             PromptChoice(
                 id: item.id,
@@ -952,7 +1225,7 @@ struct ConversationsView: View {
                     PromptChoice(
                         id: customID,
                         title: custom,
-                        tag: "自定义/中转",
+                        tag: "自定义",
                         agentID: agent.id,
                         selected: selectedModelChoiceID == customID || customModelName == custom
                     )
@@ -996,7 +1269,8 @@ struct ConversationsView: View {
             return customModelName
         }
         if let selectedID = selectedModelChoiceID,
-           let match = landingModelChoices.first(where: { $0.id == selectedID }) {
+           let match = landingModelChoices.first(where: { $0.id == selectedID })
+        {
             return match.title
         }
         if let firstSelected = landingModelChoices.first(where: \.selected) {
@@ -1032,41 +1306,11 @@ struct ConversationsView: View {
         }
         let activeID = selectedAccessModeID ?? "auto"
         return [
-            PromptChoice(
-                id: "manual",
-                title: "手动审批",
-                detail: "每次修改前询问确认",
-                icon: "shield",
-                selected: activeID == "manual"
-            ),
-            PromptChoice(
-                id: "accept_edits",
-                title: "自动接受编辑",
-                detail: "自动接受所有文件编辑",
-                icon: "shield",
-                selected: activeID == "accept_edits"
-            ),
-            PromptChoice(
-                id: "plan",
-                title: "仅规划",
-                detail: "执行前先生成规划方案",
-                icon: "shield",
-                selected: activeID == "plan"
-            ),
-            PromptChoice(
-                id: "auto",
-                title: "自动",
-                detail: "由 Agent 自动处理权限判断",
-                icon: "shield",
-                selected: activeID == "auto"
-            ),
-            PromptChoice(
-                id: "bypass",
-                title: "跳过权限",
-                detail: "自动通过所有权限请求",
-                icon: "shield",
-                selected: activeID == "bypass"
-            ),
+            PromptChoice(id: "manual", title: "手动审批", detail: "每次修改前询问确认", icon: "shield", selected: activeID == "manual"),
+            PromptChoice(id: "accept_edits", title: "自动接受编辑", detail: "自动接受所有文件编辑", icon: "shield", selected: activeID == "accept_edits"),
+            PromptChoice(id: "plan", title: "仅规划", detail: "执行前先生成规划方案", icon: "shield", selected: activeID == "plan"),
+            PromptChoice(id: "auto", title: "自动", detail: "由 Agent 自动处理权限判断", icon: "shield", selected: activeID == "auto"),
+            PromptChoice(id: "bypass", title: "完全访问", detail: "自动通过所有权限请求", icon: "shield", selected: activeID == "bypass"),
         ]
     }
 
@@ -1089,7 +1333,7 @@ struct ConversationsView: View {
         return PromptEffort(levels: levels, index: idx)
     }
 
-    private var landingPromptBar: some View {
+    private var newThreadPromptBar: some View {
         PromptBar(
             draft: $draft,
             menu: $composerMenu,
@@ -1106,23 +1350,33 @@ struct ConversationsView: View {
             accessChoices: landingAccessChoices,
             extraChoices: [],
             effort: landingEffort,
+            placeholder: "发消息或提问…",
             openFiles: {
-                if let ws = currentWorkspaceID {
+                if let ws = effectiveNewThreadWorkspaceID {
                     activeFileBrowserWorkspace = WorkspaceSheetTarget(
                         workspaceID: ws,
-                        title: currentGroup?.name ?? "文件"
+                        title: effectiveNewThreadProject?.displayName ?? "项目文件"
                     )
+                }
+            },
+            onRefreshCatalog: {
+                Task {
+                    if let fetched = try? await client.agentCatalog(), !fetched.isEmpty {
+                        agents = fetched
+                    }
                 }
             },
             send: {
                 startNewConversation(with: draft)
+            },
+            sendText: { sentText in
+                startNewConversation(with: sentText)
             },
             stop: {},
             pickAgent: { id in
                 selectedAgentID = id
                 selectedModelChoiceID = nil
                 customModelName = nil
-                composerMenu = nil
             },
             pickModel: { id in
                 if id.hasPrefix("switch-agent|") {
@@ -1144,7 +1398,6 @@ struct ConversationsView: View {
                     customModelName = nil
                     selectedModelChoiceID = id
                 }
-                composerMenu = nil
             },
             onAddCustomModel: { custom in
                 rememberCustomModel(custom)
@@ -1155,7 +1408,6 @@ struct ConversationsView: View {
             },
             pickAccess: { id in
                 selectedAccessModeID = id
-                composerMenu = nil
             },
             pickExtra: { _ in },
             setEffort: { index in
@@ -1167,11 +1419,11 @@ struct ConversationsView: View {
     private func startNewConversation(with text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isCreatingAndSending else { return }
-        guard let workspaceID = currentWorkspaceID else {
+        guard let workspaceID = effectiveNewThreadWorkspaceID else {
             actionErrorMessage = "当前没有可用项目工作区，请先在桌面端导入项目"
             return
         }
-        let agentID = currentAgent?.id ?? visibleConversations.first?.agent_id ?? "claude_code"
+        let agentID = currentAgent?.id ?? recentConversations.first?.agent_id ?? "claude_code"
         let chosenModel = resolvedSelectedModelKeyValue
         let chosenModeID = selectedAccessModeID
         let chosenEffort: (key: String, value: JSONValue)? = {
@@ -1198,191 +1450,247 @@ struct ConversationsView: View {
                     agentID: agentID
                 )
                 attentionCenter?.markLocallyCreatedConversation(created.id)
-                _ = try? await client.ensureSessionControls(conversationID: created.id)
-                if let chosenModeID, !chosenModeID.isEmpty {
-                    try? await client.setSessionMode(conversationID: created.id, modeID: chosenModeID)
-                }
-                if let chosenModel, !chosenModel.value.isEmpty, chosenModel.value != "default" {
-                    try? await client.setSessionConfigOption(
-                        conversationID: created.id,
-                        key: chosenModel.key,
-                        value: .string(chosenModel.value)
-                    )
-                }
-                if let chosenEffort {
-                    try? await client.setSessionConfigOption(
-                        conversationID: created.id,
-                        key: chosenEffort.key,
-                        value: chosenEffort.value
-                    )
-                }
-                try await client.sendMessage(
-                    conversationID: created.id,
+                setManuallyCompleted(created.id, completed: false)
+
+                pendingInitialPrompts[created.id] = PendingInitialPrompt(
+                    text: trimmed,
                     workspaceID: workspaceID,
                     agentID: agentID,
-                    text: trimmed
+                    modeID: chosenModeID,
+                    modelKey: chosenModel?.key,
+                    modelValue: chosenModel?.value,
+                    effortKey: chosenEffort?.key,
+                    effortValue: chosenEffort?.value
                 )
+
+                let nowISO = ISO8061NowString()
+                let optimistic = KanbanSessionSummary(
+                    id: created.id,
+                    workspaceId: workspaceID,
+                    name: created.title,
+                    displayName: created.title,
+                    status: .inprogress,
+                    executor: agentID,
+                    agentId: agentID,
+                    workspaceName: effectiveNewThreadWorkspaceRecord?.name,
+                    workspaceBranch: effectiveNewThreadBranchLabel,
+                    createdAt: nowISO,
+                    updatedAt: nowISO,
+                    firstPrompt: trimmed,
+                    isRunning: true,
+                    model: chosenModel?.value ?? created.model
+                )
+                sessions.removeAll { $0.id == created.id }
+                sessions.insert(optimistic, at: 0)
                 draft = ""
-                userRequestedNewChatLanding = false
-                withAnimation(.smooth(duration: 0.22)) {
-                    activeConversation = created
-                }
-                await reload()
+                path = [.conversation(created)]
+                Task { await reload() }
             } catch {
+                draft = trimmed
                 actionErrorMessage = describeHostFailure(error)
             }
         }
     }
 
-    // MARK: - Project Picker Sheet
+    // MARK: - Session Actions & Data Loading
 
-    private var projectPickerSheet: some View {
-        NavigationStack {
-            List {
-                ForEach(groups.filter { $0.id != "other" }) { group in
-                    let isSelected = currentGroup?.id == group.id
-                    Button {
-                        selectedProjectID = group.id
-                        showProjectPickerSheet = false
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: group.isHome ? "house" : "folder")
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 28)
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(group.name)
-                                    .font(.system(size: 15, weight: isSelected ? .semibold : .regular))
-                                    .foregroundStyle(.primary)
-                                if !group.rootPath.isEmpty {
-                                    Text(group.rootPath)
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                }
-                            }
-
-                            Spacer()
-
-                            if isSelected {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(Color.accentColor)
-                            }
-                        }
-                        .padding(.vertical, 3)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .navigationTitle("选择项目")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { showProjectPickerSheet = false }
-                }
-            }
+    private func markLocalSessionRunning(conversation: ConversationListItem, promptText: String) {
+        setManuallyCompleted(conversation.id, completed: false)
+        let nowISO = ISO8061NowString()
+        if let idx = sessions.firstIndex(where: { $0.id == conversation.id }) {
+            sessions[idx].status = .inprogress
+            sessions[idx].isRunning = true
+            sessions[idx].updatedAt = nowISO
+        } else {
+            let optimistic = KanbanSessionSummary(
+                id: conversation.id,
+                workspaceId: conversation.workspace_id,
+                name: conversation.title,
+                displayName: conversation.title,
+                status: .inprogress,
+                executor: conversation.agent_id,
+                agentId: conversation.agent_id,
+                createdAt: nowISO,
+                updatedAt: nowISO,
+                firstPrompt: promptText,
+                isRunning: true,
+                model: conversation.model
+            )
+            sessions.insert(optimistic, at: 0)
         }
     }
 
-    // MARK: - Helpers & Data Loading
+    private func markLocalSessionViewedNow(sessionID: String) {
+        let nowISO = ISO8061NowString()
+        if let idx = sessions.firstIndex(where: { $0.id == sessionID }) {
+            sessions[idx].isRunning = false
+            sessions[idx].status = .done
+            sessions[idx].updatedAt = nowISO
+        }
+    }
+
+    private func openSession(_ session: KanbanSessionSummary) {
+        if session.completesWhenViewed {
+            if let idx = sessions.firstIndex(where: { $0.id == session.id }) {
+                sessions[idx].status = .done
+            }
+            Task {
+                try? await client.markSessionViewed(sessionID: session.id)
+            }
+        }
+        path.append(.conversation(session.asConversationListItem))
+    }
 
     private func consumePendingNavigationIfNeeded() {
         guard let target = attentionCenter?.pendingNavigationConversation else { return }
         attentionCenter?.pendingNavigationConversation = nil
-        isSidebarOpen = false
-        userRequestedNewChatLanding = false
-        withAnimation(.smooth(duration: 0.2)) {
-            activeConversation = target
-        }
+        path = [.conversation(target)]
     }
 
-    private func syncWithFetchedConversations(_ fetched: [ConversationListItem]) {
-        if let current = activeConversation,
-           let updated = fetched.first(where: { $0.id == current.id }) {
-            activeConversation = updated
-        } else if !didSyncInitialDesktopConversation && !userRequestedNewChatLanding,
-                  let initial = fetched.first(where: { !removedConversationIDs.contains($0.id) }) {
-            didSyncInitialDesktopConversation = true
-            withAnimation(.smooth(duration: 0.22)) {
-                activeConversation = initial
+    private func performStatusChange(_ session: KanbanSessionSummary, to newStatus: KanbanSessionStatus) {
+        let oldStatus = session.status
+        let wasManuallyCompleted = manuallyCompletedIDs.contains(session.id)
+        setManuallyCompleted(session.id, completed: newStatus == .done)
+        if let idx = sessions.firstIndex(where: { $0.id == session.id }) {
+            sessions[idx].status = newStatus
+            if newStatus != .inprogress {
+                sessions[idx].isRunning = false
+            }
+        }
+        Task {
+            do {
+                try await client.updateSessionStatus(sessionID: session.id, status: newStatus)
+                await reload()
+            } catch {
+                setManuallyCompleted(session.id, completed: wasManuallyCompleted)
+                if let idx = sessions.firstIndex(where: { $0.id == session.id }) {
+                    sessions[idx].status = oldStatus
+                }
+                actionErrorMessage = describeHostFailure(error)
             }
         }
     }
 
-    private func archiveSingleConversation(_ item: ConversationListItem) {
-        let id = item.id
+    private func performTogglePin(_ session: KanbanSessionSummary) {
+        let nextPinned = !session.isPinned
+        if let idx = sessions.firstIndex(where: { $0.id == session.id }) {
+            sessions[idx].pinnedAt = nextPinned ? ISO8061NowString() : nil
+        }
+        Task {
+            do {
+                try await client.setSessionPinned(sessionID: session.id, pinned: nextPinned)
+                await reload()
+            } catch {
+                actionErrorMessage = describeHostFailure(error)
+                await reload()
+            }
+        }
+    }
+
+    private func performRename(_ session: KanbanSessionSummary, newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let idx = sessions.firstIndex(where: { $0.id == session.id }) {
+            sessions[idx].name = trimmed.isEmpty ? nil : trimmed
+        }
+        Task {
+            do {
+                try await client.renameSession(sessionID: session.id, name: trimmed.isEmpty ? nil : trimmed)
+                await reload()
+            } catch {
+                actionErrorMessage = describeHostFailure(error)
+                await reload()
+            }
+        }
+    }
+
+    private func performArchive(_ session: KanbanSessionSummary) {
+        let id = session.id
         withAnimation {
-            _ = removedConversationIDs.insert(id)
-            if activeConversation?.id == id {
-                activeConversation = nil
-            }
+            _ = removedSessionIDs.insert(id)
         }
         Task {
             do {
                 try await client.archiveConversation(conversationID: id)
-                actionErrorMessage = nil
                 await reload()
             } catch {
-                withAnimation { _ = removedConversationIDs.remove(id) }
+                withAnimation { _ = removedSessionIDs.remove(id) }
                 actionErrorMessage = describeHostFailure(error)
             }
         }
     }
 
-    private func deleteSingleConversation(_ item: ConversationListItem) {
-        let id = item.id
+    private func performDelete(_ session: KanbanSessionSummary) {
+        let id = session.id
         withAnimation {
-            _ = removedConversationIDs.insert(id)
-            if activeConversation?.id == id {
-                activeConversation = nil
-            }
+            _ = removedSessionIDs.insert(id)
         }
         Task {
             do {
                 try await client.deleteConversation(conversationID: id)
-                actionErrorMessage = nil
                 await reload()
             } catch {
-                withAnimation { _ = removedConversationIDs.remove(id) }
+                withAnimation { _ = removedSessionIDs.remove(id) }
                 actionErrorMessage = describeHostFailure(error)
             }
         }
     }
 
-    private func reload() async {
-        async let projectsTask = try? client.projects()
-        async let agentsTask = try? client.agentCatalog()
-        let (fetchedProjects, fetchedAgents) = await (projectsTask, agentsTask)
-        if let fetchedProjects { projects = fetchedProjects }
-        if let fetchedAgents, !fetchedAgents.isEmpty { agents = fetchedAgents }
+    private func loadWorkspacesAndDiffForNewThread(projectID: String) async {
+        if let wsList = try? await client.kanbanWorkspaces(projectID: projectID) {
+            workspacesByProject[projectID] = wsList
+        }
+        if let wid = effectiveNewThreadWorkspaceID,
+           let diffs = try? await client.workspaceDiff(workspaceID: wid)
+        {
+            newThreadDiffCount = diffs.count
+        }
+    }
 
-        await list.load {
-            let fetched = try await client.call(
+    private func reload() async {
+        do {
+            async let projectsTask = client.projects()
+            async let agentsTask = try? client.agentCatalog()
+            async let recentTask = try? client.call(
                 "conversation_list_recent",
                 args: ["sinceDays": 30, "limit": 100],
                 as: [ConversationListItem].self
             )
-            let activeIDs = Set(fetched.map(\.id))
-            removedConversationIDs.formIntersection(activeIDs)
-            syncWithFetchedConversations(fetched)
-            return fetched
+
+            let (loadedProjects, fetchedAgents, fetchedRecent) = try await (projectsTask, agentsTask, recentTask)
+            projects = loadedProjects
+            if let fetchedAgents, !fetchedAgents.isEmpty {
+                agents = fetchedAgents
+            }
+            if let fetchedRecent {
+                recentConversations = fetchedRecent
+            }
+
+            let allWorkspaceIDs = loadedProjects.flatMap(\.workspaceIds)
+            if !allWorkspaceIDs.isEmpty,
+               let fetchedSessions = try? await client.kanbanAllSessions(workspaceIDs: allWorkspaceIDs)
+            {
+                sessions = fetchedSessions
+            }
+
+            let activeIDs = Set(sessions.map(\.id)).union(recentConversations.map(\.id))
+            removedSessionIDs.formIntersection(activeIDs)
+            loadErrorMessage = nil
+            isLoading = false
+        } catch {
+            loadErrorMessage = describeHostFailure(error)
+            isLoading = false
         }
     }
+}
+
+private func ISO8061NowString() -> String {
+    ISO8601DateFormatter().string(from: Date())
 }
 
 private struct WorkspaceSheetTarget: Identifiable {
     let workspaceID: String
     let title: String
     var id: String { workspaceID }
-}
-
-private struct FilePreviewSheetTarget: Identifiable {
-    let workspaceID: String
-    let path: String
-    var id: String { "\(workspaceID):\(path)" }
 }
 
 extension ConversationListItem: Hashable {
